@@ -180,6 +180,7 @@ class ResearchOrchestrator:
         query: str,
         progress_queue: asyncio.Queue | None = None,
         session_id: str | None = None,
+        target_doc_id: str | None = None,
     ) -> str:
         print(f"\n\U0001f680 [Orchestrator] Starting Single Iterative Research for: '{query}'\n")
 
@@ -195,6 +196,11 @@ class ResearchOrchestrator:
             "loop_count": 0,
             "chat_history": self.sessions.get_messages(session_id),
         }
+
+        if target_doc_id:
+            # "Chat with Paper": scope this entire run to one ingested document.
+            # The Tool Router bypasses external search tools accordingly.
+            initial_state["target_doc_id"] = target_doc_id
 
         stream_id = None
         if progress_queue is not None:
@@ -248,7 +254,13 @@ class ResearchOrchestrator:
         except Exception:
             yield fallback
 
-    async def stream_research(self, query: str, mode: str, session_id: str | None = None):
+    async def stream_research(
+        self,
+        query: str,
+        mode: str,
+        session_id: str | None = None,
+        target_doc_id: str | None = None,
+    ):
         """
         Streams structured events: assurance tokens first, then progress and
         tool_telemetry packets while workers run, then telemetry stats and the
@@ -262,7 +274,7 @@ class ResearchOrchestrator:
 
         if mode == "single":
             research_task = asyncio.create_task(
-                self.run_single_research(query, progress_queue, session_id)
+                self.run_single_research(query, progress_queue, session_id, target_doc_id)
             )
         elif mode == "deep":
             research_task = asyncio.create_task(
@@ -274,8 +286,18 @@ class ResearchOrchestrator:
 
         # 1. ASSURANCE FIRST: the workers are already spinning up in the background
         # while we stream the instant intent acknowledgment to the user.
-        async for token in self._assurance_stream(query, session_id):
-            yield {"event": "assurance", "data": token}
+        if target_doc_id:
+            # Document focus mode: deterministic assurance (no LLM call) so the
+            # message accurately reflects the isolated single-paper scope.
+            focused_assurance = (
+                "I'll answer this using only your pinned document, retrieving "
+                "and citing the most relevant passages from that paper."
+            )
+            for word in focused_assurance.split(" "):
+                yield {"event": "assurance", "data": word + " "}
+        else:
+            async for token in self._assurance_stream(query, session_id):
+                yield {"event": "assurance", "data": token}
 
         # 2. LIVE PROGRESS + STRUCTURED TELEMETRY LOOP
         while not research_task.done():

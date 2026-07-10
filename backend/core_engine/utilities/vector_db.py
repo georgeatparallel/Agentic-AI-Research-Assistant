@@ -20,7 +20,7 @@ embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 # Define the local persistence directory for the SQLite-based Chroma database
 CHROMA_PATH = "./chroma_db"
 
-def ingest_pdf_to_chroma(pdf_path: str):
+def ingest_pdf_to_chroma(pdf_path: str, doc_id: str | None = None):
     """
     Loads a PDF document, chunks it to preserve semantic meaning, 
     and saves the embeddings to the local vector database.
@@ -47,6 +47,12 @@ def ingest_pdf_to_chroma(pdf_path: str):
     )
     chunks = text_splitter.split_documents(documents)
     print(f"✂️ [Vector DB] Split PDF into {len(chunks)} chunks.")
+
+    # Stamp every chunk with its parent document ID so "Chat with Paper" mode
+    # can filter retrieval down to a single ingested document.
+    if doc_id:
+        for chunk in chunks:
+            chunk.metadata["doc_id"] = doc_id
     
     # 3. Embed and Persist
     db = Chroma.from_documents(
@@ -57,7 +63,7 @@ def ingest_pdf_to_chroma(pdf_path: str):
     print("💾 [Vector DB] Chunks successfully embedded and saved to ChromaDB!")
     return True
 
-def retrieve_context(query: str, k: int = 3):
+def retrieve_context(query: str, k: int = 3, doc_id: str | None = None):
     """
     Performs a mathematical similarity search against the local Vector DB.
     
@@ -71,8 +77,13 @@ def retrieve_context(query: str, k: int = 3):
     # Connect to the existing local database
     db = Chroma(persist_directory=CHROMA_PATH, embedding_function=embeddings)
     
-    # Execute a K-Nearest Neighbors (KNN) style similarity search in the vector space
-    results = db.similarity_search(query, k=k)
+    # Execute a K-Nearest Neighbors (KNN) style similarity search in the vector space.
+    # In "Chat with Paper" mode, restrict the search to the pinned document's chunks
+    # via a Chroma metadata filter.
+    if doc_id:
+        results = db.similarity_search(query, k=k, filter={"doc_id": doc_id})
+    else:
+        results = db.similarity_search(query, k=k)
     
     # Combine the retrieved chunks into a single string context for the LLM prompt
     context = "\n\n".join([doc.page_content for doc in results])

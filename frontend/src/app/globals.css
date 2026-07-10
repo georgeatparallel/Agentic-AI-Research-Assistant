@@ -3,7 +3,7 @@
 
 :root {
   --background: #ffffff;
-  --foreground: #171717;
+  --foreground: #0f172a;
 }
 
 @theme inline {
@@ -13,20 +13,13 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* --- CUSTOM DARK MODE SCROLLBAR --- */
+/* --- LIGHT MODE SCROLLBAR --- */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -37,18 +30,18 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
-  /* Tailwind slate-700 */
+  background: #cbd5e1;
+  /* Tailwind slate-300 */
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
-  /* Tailwind slate-600 */
+  background: #94a3b8;
+  /* Tailwind slate-400 */
 }
 
 /* For Firefox compatibility */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #334155 transparent;
+  scrollbar-color: #cbd5e1 transparent;
 }

@@ -324,7 +324,7 @@ function AssistantBubble({ msg, onDownload, onPinDoc }: { msg: ChatMessage; onDo
 
 function CommandBar({
   query, setQuery, workflow, setWorkflow, onSubmit, isLoading,
-  pinnedDoc, onClearPin, inputRef, dropUp,
+  pinnedDoc, onClearPin, inputRef,
 }: {
   query: string;
   setQuery: (v: string) => void;
@@ -335,7 +335,6 @@ function CommandBar({
   pinnedDoc: UploadedDoc | null;
   onClearPin: () => void;
   inputRef: React.RefObject<HTMLInputElement | null>;
-  dropUp: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -401,10 +400,11 @@ function CommandBar({
           </button>
 
           {open && (
-            /* Constrained container: max-h + overflow-y-auto keeps the expanded
-               TOOLS/WORKFLOWS categories inside the viewport with a smooth
-               vertical scrollbar instead of spilling off-screen. */
-            <div className={`absolute left-0 w-72 bg-white border border-slate-200 rounded-xl shadow-2xl max-h-[320px] overflow-y-auto overscroll-contain z-50 ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
+            /* Always opens upward: bottom-full + mb-2 anchors the menu above the
+               trigger, while max-h + overflow-y-auto keeps the expanded
+               TOOLS/WORKFLOWS categories fully inside the visible viewport and
+               z-50 renders it cleanly above the chat feed bubbles. */
+            <div className="absolute left-0 bottom-full mb-2 w-72 bg-white border border-slate-200 rounded-xl shadow-2xl max-h-[320px] overflow-y-auto overscroll-contain z-50">
               {(['TOOLS', 'WORKFLOWS'] as const).map(group => (
                 <div key={group}>
                   <div className="px-4 pt-3 pb-1 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
@@ -841,7 +841,7 @@ export default function AgenticChat() {
                 workflow={workflow} setWorkflow={setWorkflow}
                 onSubmit={handleResearch} isLoading={isLoading}
                 pinnedDoc={pinnedDoc} onClearPin={() => setPinnedDoc(null)}
-                inputRef={inputRef} dropUp={false}
+                inputRef={inputRef}
               />
             </div>
           </div>
@@ -871,7 +871,7 @@ export default function AgenticChat() {
                   workflow={workflow} setWorkflow={setWorkflow}
                   onSubmit={handleResearch} isLoading={isLoading}
                   pinnedDoc={pinnedDoc} onClearPin={() => setPinnedDoc(null)}
-                  inputRef={inputRef} dropUp={true}
+                  inputRef={inputRef}
                 />
               </div>
             </div>

@@ -13,7 +13,7 @@ from datetime import datetime
 from langchain_core.prompts import ChatPromptTemplate
 
 from core_engine.llm_router import LLMRouter
-from core_engine.utilities.progress import emit_progress
+from core_engine.utilities.progress import emit_progress, emit_event
 
 # --- 1. PYDANTIC SCHEMAS (The Action Payload Blueprint) ---
 class ToolTask(BaseModel):

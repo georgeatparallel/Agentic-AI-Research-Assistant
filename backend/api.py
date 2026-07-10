@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -35,6 +36,9 @@ orchestrator = ResearchOrchestrator()
 class ResearchRequest(BaseModel):
     query: str
     mode: str  # Must be 'single' or 'deep'
+    # Conversational continuity: the frontend generates a stable session_id per
+    # chat and sends it with every turn so follow-ups reference prior reports.
+    session_id: Optional[str] = None
 
 # --- 1. RESEARCH ENDPOINT ---
 @app.post("/api/research")
@@ -45,16 +49,16 @@ async def generate_research(request: ResearchRequest):
         
     try:
         if request.mode == "single":
-            report = await orchestrator.run_single_research(request.query)
+            report = await orchestrator.run_single_research(request.query, session_id=request.session_id)
         elif request.mode == "deep":
-            report = await orchestrator.run_deep_research(request.query)
+            report = await orchestrator.run_deep_research(request.query, session_id=request.session_id)
         else:
             raise HTTPException(status_code=400, detail="Invalid mode. Use 'single' or 'deep'.")
             
         return {"status": "success", "report": report}
     
     except Exception as e:
-        print(f"❌ API Error: {str(e)}")
+        print(f"\u274c API Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def format_sse_event(event: str, payload: dict) -> str:
@@ -63,17 +67,27 @@ def format_sse_event(event: str, payload: dict) -> str:
 
 
 async def research_event_stream(request: ResearchRequest):
-    """Yield clean progress updates, telemetry, and a final report as SSE chunks."""
+    """Yield assurance tokens, tool telemetry, progress updates, and the final report as SSE chunks."""
     try:
-        async for update in orchestrator.stream_research(request.query, request.mode):
+        async for update in orchestrator.stream_research(request.query, request.mode, request.session_id):
             event_type = update["event"]
             data = update["data"]
 
-            if event_type == "progress":
+            if event_type == "assurance":
+                # Raw token stream. Never run tokens through sanitize_status:
+                # trimming would destroy the whitespace between streamed words.
+                yield format_sse_event("assurance", {"token": data})
+
+            elif event_type == "tool_telemetry":
+                # Structured JSON packet describing the exact concurrent tool
+                # queries selected by the Tool Router (rendered as an accordion).
+                yield format_sse_event("tool_telemetry", data)
+
+            elif event_type == "progress":
                 yield format_sse_event("progress", {"message": sanitize_status(data)})
             
             elif event_type == "telemetry":
-                # NEW: Catch the telemetry event, parse the JSON string back to a dict, 
+                # Final run statistics: parse the JSON string back to a dict
                 # and safely route it to the frontend dashboard.
                 yield format_sse_event("telemetry", json.loads(data))
                 
@@ -132,7 +146,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         return {"status": "success", "message": f"'{safe_filename}' successfully ingested into Vector Database!"}
         
     except Exception as e:
-        print(f"❌ Upload Error: {str(e)}")
+        print(f"\u274c Upload Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
     finally:
         # Ensure cleanup happens even if ingestion crashes

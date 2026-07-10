@@ -153,4 +153,4 @@ def build_loop_worker(checkpointer=None):
     # 5. Define the Exit Point
     workflow.add_edge("synthesize", END)
     
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

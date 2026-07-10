@@ -11,6 +11,7 @@ from datetime import datetime
 from langchain_core.prompts import ChatPromptTemplate
 
 from core_engine.llm_router import LLMRouter
+from core_engine.session_memory import format_messages_for_prompt
 from core_engine.utilities.progress import emit_progress
 
 # --- 1. PYDANTIC SCHEMA ---
@@ -27,14 +28,18 @@ Your job is to critically analyze the current state of a research task, identify
 ORIGINAL OVERALL QUERY: {query}
 SPECIFIC SECTION BEING RESEARCHED: {section_question}
 
+PRIOR CONVERSATION CONTEXT (earlier questions and generated reports from this session; may be empty):
+{conversation}
+
 HISTORY OF FINDINGS AND ACTIONS SO FAR:
 {history}
 
 Your task:
 1. Review the history of findings against the section question.
-2. Determine if you have enough detailed, factual information to write a comprehensive answer.
-3. If yes, set research_complete to true and outstanding_gaps to an empty list.
-4. If no, set research_complete to false and identify up to 3 specific knowledge gaps that need to be addressed next.
+2. Treat the prior conversation context as valid, already-gathered evidence. If the section question is a follow-up that can be answered from the prior conversation plus current findings, no further research is needed.
+3. Determine if you have enough detailed, factual information to write a comprehensive answer.
+4. If yes, set research_complete to true and outstanding_gaps to an empty list.
+5. If no, set research_complete to false and identify up to 3 specific knowledge gaps that need to be addressed next.
 """
 
 # --- 3. THE LANGGRAPH NODE ---
@@ -44,9 +49,10 @@ async def gap_analyzer_node(state: dict):
     user_query = state.get("query", "Unknown query")
     current_section = state.get("current_section", "Unknown section")
     research_history = state.get("research_history", "No research conducted yet.")
+    conversation = format_messages_for_prompt(state.get("chat_history", []) or [])
     emit_progress(state, "[Gap Analyzer] Evaluating research coverage and identifying missing information.")
     
-    print(f"🔍 [Gap Analyzer] Evaluating research state for: '{current_section}'")
+    print(f"\ud83d\udd0d [Gap Analyzer] Evaluating research state for: '{current_section}'")
     
     # THROTTLE: Artificially delay execution by 4 seconds to protect the Gemini 15 RPM Free Tier Limit.
     # This prevents the SQLite cache from triggering a 429 Quota Error on rapid repeat searches.
@@ -72,10 +78,11 @@ async def gap_analyzer_node(state: dict):
             "date": current_date, 
             "query": user_query,
             "section_question": current_section,
+            "conversation": conversation,
             "history": research_history
         })
     except Exception as e:
-        print(f"⚠️ [Gap Analyzer] LLM parsing glitch detected. Deploying safety hatch.")
+        print(f"\u26a0\ufe0f [Gap Analyzer] LLM parsing glitch detected. Deploying safety hatch.")
         # THE FIX: If it glitches, DO NOT quit. Force it to route back to the tools.
         evaluation = KnowledgeGapOutput(
             research_complete=False, 
@@ -84,10 +91,10 @@ async def gap_analyzer_node(state: dict):
         
     if evaluation.research_complete:
         emit_progress(state, "[Gap Analyzer] Research coverage is sufficient. Preparing the final report.")
-        print("✅ [Gap Analyzer] Research complete! Ready to write.")
+        print("\u2705 [Gap Analyzer] Research complete! Ready to write.")
     else:
         emit_progress(state, f"[Gap Analyzer] Found {len(evaluation.outstanding_gaps)} knowledge gaps. Selecting the best research tools.")
-        print(f"⚠️ [Gap Analyzer] Found {len(evaluation.outstanding_gaps)} missing gaps. Routing back to tools.")
+        print(f"\u26a0\ufe0f [Gap Analyzer] Found {len(evaluation.outstanding_gaps)} missing gaps. Routing back to tools.")
     
     return {
         "research_complete": evaluation.research_complete,

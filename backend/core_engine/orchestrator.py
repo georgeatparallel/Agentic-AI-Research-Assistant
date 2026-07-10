@@ -24,7 +24,13 @@ import uuid
 from langgraph.checkpoint.memory import MemorySaver
 
 from core_engine.nodes.strategy_planner import strategy_planner_node
-from core_engine.nodes.intent_classifier import classify_intent, CONVERSATIONAL, DEEP_RESEARCH
+from core_engine.nodes.intent_classifier import (
+    classify_intent,
+    resolve_workflow_route,
+    CONVERSATIONAL,
+    DEEP_RESEARCH,
+    RESEARCH_AGENT,
+)
 from core_engine.loop_worker import build_loop_worker, ResearchState
 from core_engine.llm_router import LLMRouter
 from core_engine.session_memory import SessionStore, format_messages_for_prompt
@@ -213,6 +219,7 @@ class ResearchOrchestrator:
         session_id: str | None = None,
         target_doc_id: str | None = None,
         intent_route: str | None = None,
+        workflow_mode: str | None = None,
     ) -> dict:
         print(f"\n\U0001f680 [Orchestrator] Starting Single Iterative Research for: '{query}'\n")
 
@@ -229,6 +236,11 @@ class ResearchOrchestrator:
             "chat_history": self.sessions.get_messages(session_id),
             "extraction_matrix": [],
         }
+
+        if workflow_mode:
+            # Explicit Elicit command-bar workflow: the graph's Intent Classifier
+            # maps it to the right route (and flags such as rag_only) itself.
+            initial_state["workflow_mode"] = workflow_mode
 
         if intent_route in (CONVERSATIONAL, DEEP_RESEARCH):
             # Preset by the streaming intent gate: the graph's Intent Classifier
@@ -260,7 +272,13 @@ class ResearchOrchestrator:
 
         report = final_state["completed_sections"][0]
         extraction_matrix = final_state.get("extraction_matrix") or []
-        kind = "chat" if final_state.get("intent_route") == CONVERSATIONAL else "research"
+        # Conversational replies and Research Agent clarification questions are
+        # rendered as chat bubbles, not report cards.
+        is_chat_turn = (
+            final_state.get("intent_route") == CONVERSATIONAL
+            or bool(final_state.get("needs_clarification"))
+        )
+        kind = "chat" if is_chat_turn else "research"
 
         # Record this turn (bubble + matrix) so follow-ups and the session
         # timeline can reference it.
@@ -308,6 +326,7 @@ class ResearchOrchestrator:
         mode: str,
         session_id: str | None = None,
         target_doc_id: str | None = None,
+        workflow_mode: str | None = None,
     ):
         """
         Streams structured events: assurance tokens first, then progress and
@@ -324,9 +343,14 @@ class ResearchOrchestrator:
             yield {"event": "error", "data": "Invalid mode. Use 'single' or 'deep'."}
             return
 
-        # 0. INTENT GATE: classify before launching the pipeline so greetings and
-        # conversational follow-ups never trigger assurance text or tool loops.
-        if target_doc_id:
+        # 0. INTENT GATE: explicit command-bar workflows resolve deterministically;
+        # otherwise classify so greetings never trigger assurance or tool loops.
+        normalized_workflow = str(workflow_mode or "").strip().lower() or None
+        workflow_route = resolve_workflow_route(normalized_workflow)
+
+        if workflow_route:
+            route = workflow_route
+        elif target_doc_id:
             route = DEEP_RESEARCH
         else:
             route = await classify_intent(query, self.sessions.get_messages(session_id))
@@ -335,6 +359,13 @@ class ResearchOrchestrator:
             research_task = asyncio.create_task(
                 self.run_single_research(
                     query, progress_queue, session_id, None, intent_route=CONVERSATIONAL
+                )
+            )
+        elif workflow_route:
+            research_task = asyncio.create_task(
+                self.run_single_research(
+                    query, progress_queue, session_id, target_doc_id,
+                    workflow_mode=normalized_workflow,
                 )
             )
         elif mode == "single":
@@ -350,7 +381,9 @@ class ResearchOrchestrator:
 
         # 1. ASSURANCE FIRST (research routes only): the workers are already
         # spinning up in the background while we stream the acknowledgment.
-        if route != CONVERSATIONAL:
+        # The Research Agent route may stream a clarification question instead,
+        # so it also skips the assurance text.
+        if route not in (CONVERSATIONAL, RESEARCH_AGENT):
             if target_doc_id:
                 # Document focus mode: deterministic assurance (no LLM call) so the
                 # message accurately reflects the isolated single-paper scope.

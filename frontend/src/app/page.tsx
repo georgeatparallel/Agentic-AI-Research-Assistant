@@ -1,12 +1,22 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Link from 'next/link';
-import { BrainCircuit, UploadCloud, Send, Loader2, CheckCircle2, AlertTriangle, FileText, LayoutDashboard, Library, Download, ChevronDown, Zap, Terminal, Timer, Database, Activity, Cpu } from 'lucide-react';
+import {
+  BrainCircuit, UploadCloud, Send, Loader2, CheckCircle2, AlertTriangle,
+  FileText, LayoutDashboard, Library, Download, ChevronDown, ChevronRight,
+  Zap, Search, BookOpen, Globe, Database, Timer, Activity, Cpu,
+} from 'lucide-react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type ToolTask = { tool: string; query: string };
+
+type ToolTelemetryEvent = { count: number; tasks: ToolTask[] };
 
 type TelemetryData = {
   execution_time: number;
@@ -15,409 +25,477 @@ type TelemetryData = {
   tokens_saved: number;
 };
 
-// NEW: Object-based log state for permanent timestamps
-interface LogEntry {
-  time: string;
-  message: string;
+type MessageRole = 'user' | 'assistant';
+
+interface ChatMessage {
+  id: string;
+  role: MessageRole;
+  // For assistant messages the content is built incrementally.
+  assurance: string;          // instant intent acknowledgment
+  toolTelemetry: ToolTelemetryEvent | null;
+  report: string;             // final markdown report
+  telemetry: TelemetryData | null;
+  isStreaming: boolean;
+  // For user messages only.
+  text?: string;
 }
 
-export default function AgenticDashboard() {
-  const [query, setQuery] = useState('');
-  const [mode, setMode] = useState('single');
-  const [isModeDropdownOpen, setIsModeDropdownOpen] = useState(false);
-  const [report, setReport] = useState('');
-  const [cleanTitle, setCleanTitle] = useState('');
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const TOOL_ICONS: Record<string, React.ReactNode> = {
+  web_searcher:    <Globe    className="w-3.5 h-3.5" />,
+  arxiv_researcher:<BookOpen className="w-3.5 h-3.5" />,
+  rag_retriever:   <Database className="w-3.5 h-3.5" />,
+  web_crawler:     <Search   className="w-3.5 h-3.5" />,
+};
+
+const TOOL_LABELS: Record<string, string> = {
+  web_searcher:    'Web Search',
+  arxiv_researcher:'arXiv',
+  rag_retriever:   'Local RAG',
+  web_crawler:     'Web Crawl',
+};
+
+function generateId() {
+  return Math.random().toString(36).slice(2);
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function ToolAccordion({ telemetry }: { telemetry: ToolTelemetryEvent }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900/60 overflow-hidden">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-slate-300 hover:bg-slate-800/60 transition-colors"
+      >
+        <span className="flex items-center gap-2 font-medium">
+          <Search className="w-4 h-4 text-blue-400" />
+          Ran analysis: {telemetry.count} search{telemetry.count !== 1 ? 'es' : ''}
+        </span>
+        {open
+          ? <ChevronDown  className="w-4 h-4 text-slate-500" />
+          : <ChevronRight className="w-4 h-4 text-slate-500" />}
+      </button>
+      {open && (
+        <ul className="border-t border-slate-700 divide-y divide-slate-800">
+          {telemetry.tasks.map((t, i) => (
+            <li key={i} className="flex items-start gap-3 px-4 py-2.5">
+              <span className="mt-0.5 flex items-center gap-1.5 text-xs font-semibold text-blue-400 shrink-0 w-28">
+                {TOOL_ICONS[t.tool] ?? <Search className="w-3.5 h-3.5" />}
+                {TOOL_LABELS[t.tool] ?? t.tool}
+              </span>
+              <span className="text-xs text-slate-400 leading-relaxed">{t.query}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function TelemetryBar({ data }: { data: TelemetryData }) {
+  return (
+    <div className="mt-4 grid grid-cols-4 gap-3">
+      {[
+        { icon: <Timer    className="w-4 h-4" />, label: 'Time',         value: `${data.execution_time}s`,                  color: 'text-blue-400',   bg: 'bg-blue-900/20' },
+        { icon: <Activity className="w-4 h-4" />, label: 'API Calls',    value: String(data.api_calls),                     color: 'text-indigo-400', bg: 'bg-indigo-900/20' },
+        { icon: <Database className="w-4 h-4" />, label: 'Cache Hits',   value: String(data.cache_hits),                    color: 'text-emerald-400',bg: 'bg-emerald-900/20' },
+        { icon: <Cpu      className="w-4 h-4" />, label: 'Tokens Saved', value: `~${data.tokens_saved.toLocaleString()}`,   color: 'text-amber-400',  bg: 'bg-amber-900/20' },
+      ].map(({ icon, label, value, color, bg }) => (
+        <div key={label} className="flex items-center gap-3 bg-slate-900 border border-slate-800 rounded-xl p-3">
+          <div className={`p-2 rounded-lg ${bg} ${color}`}>{icon}</div>
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{label}</div>
+            <div className="text-sm font-semibold text-white">{value}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AssistantBubble({ msg, onDownload }: { msg: ChatMessage; onDownload: (msg: ChatMessage) => void }) {
+  return (
+    <div className="flex flex-col gap-1 max-w-3xl">
+      <div className="flex items-center gap-2 mb-1">
+        <BrainCircuit className="w-5 h-5 text-blue-500" />
+        <span className="text-xs font-semibold text-slate-400">A.R.I.A.</span>
+      </div>
+
+      {/* Assurance */}
+      {msg.assurance && (
+        <p className="text-slate-300 text-sm leading-relaxed italic">
+          {msg.assurance}
+          {msg.isStreaming && !msg.toolTelemetry && !msg.report && (
+            <span className="inline-block w-1.5 h-4 bg-blue-400 ml-1 animate-pulse rounded-sm" />
+          )}
+        </p>
+      )}
+
+      {/* Tool accordion */}
+      {msg.toolTelemetry && <ToolAccordion telemetry={msg.toolTelemetry} />}
+
+      {/* Streaming indicator while report is being written */}
+      {msg.isStreaming && msg.toolTelemetry && !msg.report && (
+        <div className="flex items-center gap-2 mt-3 text-xs text-slate-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Synthesizing report...
+        </div>
+      )}
+
+      {/* Final report */}
+      {msg.report && (
+        <div className="mt-4 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+          <div className="flex items-center justify-between mb-4 pb-4 border-b border-slate-800">
+            <span className="text-xs font-bold text-blue-500 uppercase tracking-widest">Final Report</span>
+            <button
+              onClick={() => onDownload(msg)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition-colors border border-slate-700 text-xs font-medium"
+            >
+              <Download className="w-3.5 h-3.5" /> Download
+            </button>
+          </div>
+          <div className="prose prose-invert prose-blue max-w-none prose-headings:text-slate-200 prose-a:text-blue-400 hover:prose-a:text-blue-300 prose-sm">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.report}</ReactMarkdown>
+          </div>
+        </div>
+      )}
+
+      {/* Telemetry bar */}
+      {msg.telemetry && msg.report && <TelemetryBar data={msg.telemetry} />}
+    </div>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+export default function AgenticChat() {
+  const [messages, setMessages]   = useState<ChatMessage[]>([]);
+  const [query, setQuery]         = useState('');
+  const [mode, setMode]           = useState('single');
+  const [isModeOpen, setIsModeOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  
-  // NEW: Updated logs state and minimize toggle
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isLogsMinimized, setIsLogsMinimized] = useState(false);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  
-  const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
-  
-  const [uploadStatus, setUploadStatus] = useState<{ type: 'idle' | 'loading' | 'success' | 'error', message: string }>({ type: 'idle', message: '' });
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [uploadStatus, setUploadStatus] = useState<{
+    type: 'idle' | 'loading' | 'success' | 'error'; message: string;
+  }>({ type: 'idle', message: '' });
 
+  // Stable session id for the lifetime of this browser tab.
+  const sessionIdRef = useRef<string>(generateId());
+  const bottomRef    = useRef<HTMLDivElement>(null);
+  const modeRef      = useRef<HTMLDivElement>(null);
+  const inputRef     = useRef<HTMLInputElement>(null);
+
+  // Auto-scroll to bottom on new content.
   useEffect(() => {
-    if (logsEndRef.current && !isLogsMinimized) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [logs, isLogsMinimized]);
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
+  // Close mode dropdown on outside click.
   useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsModeDropdownOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [dropdownRef]);
-
-  const saveToHistory = (searchQuery: string, searchMode: string, finalReport: string) => {
-    const existingHistory = JSON.parse(localStorage.getItem('agenticHistory') || '[]');
-    const newEntry = {
-      id: Date.now().toString(),
-      query: searchQuery,
-      mode: searchMode === 'single' ? 'Flash Agent' : 'Deep Parallel',
-      report: finalReport,
-      date: new Date().toLocaleString()
+    const handler = (e: MouseEvent) => {
+      if (modeRef.current && !modeRef.current.contains(e.target as Node))
+        setIsModeOpen(false);
     };
-    localStorage.setItem('agenticHistory', JSON.stringify([newEntry, ...existingHistory]));
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const saveToHistory = (q: string, m: string, report: string) => {
+    const existing = JSON.parse(localStorage.getItem('agenticHistory') || '[]');
+    localStorage.setItem('agenticHistory', JSON.stringify([
+      { id: Date.now().toString(), query: q, mode: m === 'single' ? 'Flash Agent' : 'Deep Parallel', report, date: new Date().toLocaleString() },
+      ...existing,
+    ]));
   };
 
-  const handleDownload = () => {
-    const blob = new Blob([`# ${cleanTitle}\n\n${report}`], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${cleanTitle.replace(/\s+/g, '_').toLowerCase()}_report.md`;
+  const handleDownload = (msg: ChatMessage) => {
+    const title = msg.text || 'report';
+    const blob  = new Blob([msg.report], { type: 'text/markdown' });
+    const url   = URL.createObjectURL(blob);
+    const a     = document.createElement('a');
+    a.href      = url;
+    a.download  = `${title.replace(/\s+/g, '_').toLowerCase()}_report.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  const getTimeStamp = () => {
-    return new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  };
+  const updateAssistantMsg = useCallback(
+    (id: string, updater: (prev: ChatMessage) => Partial<ChatMessage>) => {
+      setMessages(prev =>
+        prev.map(m => m.id === id ? { ...m, ...updater(m) } : m)
+      );
+    },
+    []
+  );
 
   const handleResearch = async () => {
-    if (!query.trim()) return;
-    
+    const trimmed = query.trim();
+    if (!trimmed || isLoading) return;
+
+    const userMsgId = generateId();
+    const asstMsgId = generateId();
+    const userQuery = trimmed;
+    const currentMode = mode;
+
+    setQuery('');
     setIsLoading(true);
-    setReport('');
-    setTelemetry(null);
-    setIsLogsMinimized(false); // Auto-expand logs on new search
-    
-    // Lock the starting timestamp
-    setLogs([{ time: getTimeStamp(), message: "[System] Initializing Agentic AI Research Engine..." }]);
-    setCleanTitle(query);
-    
+
+    // Add user bubble immediately.
+    setMessages(prev => [
+      ...prev,
+      {
+        id: userMsgId, role: 'user', text: userQuery,
+        assurance: '', toolTelemetry: null, report: '', telemetry: null, isStreaming: false,
+      },
+      {
+        id: asstMsgId, role: 'assistant',
+        assurance: '', toolTelemetry: null, report: '', telemetry: null, isStreaming: true,
+      },
+    ]);
+
     try {
       const response = await fetch(`${API_URL}/research-stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, mode })
+        body: JSON.stringify({
+          query: userQuery,
+          mode: currentMode,
+          session_id: sessionIdRef.current,
+        }),
       });
-      
-      if (!response.body) throw new Error("No readable stream available.");
-      
-      const reader = response.body.getReader();
+
+      if (!response.body) throw new Error('No readable stream available.');
+
+      const reader  = response.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = "";
-      
+      let buffer    = '';
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         buffer += decoder.decode(value, { stream: true });
         const blocks = buffer.split('\n\n');
-        buffer = blocks.pop() || "";
-        
+        buffer = blocks.pop() ?? '';
+
         for (const block of blocks) {
           if (!block.trim()) continue;
-          
+
           const eventMatch = block.match(/^event:\s*(.*)/m);
-          const dataMatch = block.match(/^data:\s*(.*)/m);
-          
-          if (eventMatch && dataMatch) {
-            const event = eventMatch[1].trim();
-            const dataStr = dataMatch[1].trim();
-            
-            try {
-              const data = JSON.parse(dataStr);
-              
-              if (event === 'progress') {
-                // Lock timestamp instantly on arrival
-                setLogs(prev => [...prev, { time: getTimeStamp(), message: data.message || data }]);
-              } else if (event === 'telemetry') {
-                setTelemetry(data);
-              } else if (event === 'complete') {
-                const cleanedReport = data.report.replace(/^(#\s*)?Research Summary:?\s*/i, '').trim();
-                setReport(cleanedReport);
-                saveToHistory(query, mode, cleanedReport);
-              } else if (event === 'error') {
-                setLogs(prev => [...prev, { time: getTimeStamp(), message: `[Fatal Error] ${data.message || data}` }]);
-                setReport(`**Agentic Error:** ${data.message || data}`);
-              }
-            } catch (err) {
-              console.error("Failed to parse SSE JSON:", err);
+          const dataMatch  = block.match(/^data:\s*(.*)/m);
+          if (!eventMatch || !dataMatch) continue;
+
+          const event   = eventMatch[1].trim();
+          const dataStr = dataMatch[1].trim();
+
+          try {
+            const data = JSON.parse(dataStr);
+
+            if (event === 'assurance') {
+              // Append streamed token to the assurance string.
+              updateAssistantMsg(asstMsgId, prev => ({
+                assurance: prev.assurance + (data.token ?? ''),
+              }));
+
+            } else if (event === 'tool_telemetry') {
+              // First telemetry packet wins (subsequent loops add more).
+              updateAssistantMsg(asstMsgId, prev => ({
+                toolTelemetry: prev.toolTelemetry
+                  ? { count: prev.toolTelemetry.count + data.count, tasks: [...prev.toolTelemetry.tasks, ...data.tasks] }
+                  : data,
+              }));
+
+            } else if (event === 'telemetry') {
+              updateAssistantMsg(asstMsgId, () => ({ telemetry: data }));
+
+            } else if (event === 'complete') {
+              const cleaned = (data.report as string).replace(/^(#\s*)?Research Summary:?\s*/i, '').trim();
+              updateAssistantMsg(asstMsgId, () => ({ report: cleaned, isStreaming: false }));
+              saveToHistory(userQuery, currentMode, cleaned);
+
+            } else if (event === 'error') {
+              updateAssistantMsg(asstMsgId, () => ({
+                report: `**Error:** ${data.message ?? data}`,
+                isStreaming: false,
+              }));
             }
+          } catch {
+            // Malformed JSON block — skip silently.
           }
         }
       }
-    } catch (error) {
-      setReport(`**Connection Error:** Make sure the FastAPI backend is running and the streaming endpoint is accessible.`);
+    } catch (err) {
+      updateAssistantMsg(asstMsgId, () => ({
+        report: '**Connection Error:** Make sure the FastAPI backend is running.',
+        isStreaming: false,
+      }));
     } finally {
       setIsLoading(false);
-      setQuery(''); 
+      inputRef.current?.focus();
     }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     setUploadStatus({ type: 'loading', message: `Ingesting ${file.name}...` });
     const formData = new FormData();
-    formData.append("file", file);
-
+    formData.append('file', file);
     try {
-      const response = await fetch(`${API_URL}/upload-pdf`, {
-        method: 'POST',
-        body: formData
-      });
-      const data = await response.json();
-
-      if (response.ok) {
-        setUploadStatus({ type: 'success', message: `${file.name} embedded successfully!` });
-      } else {
-        setUploadStatus({ type: 'error', message: data.detail || 'Upload failed.' });
-      }
-    } catch (error) {
+      const res  = await fetch(`${API_URL}/upload-pdf`, { method: 'POST', body: formData });
+      const data = await res.json();
+      setUploadStatus(res.ok
+        ? { type: 'success', message: `${file.name} embedded!` }
+        : { type: 'error',   message: data.detail || 'Upload failed.' });
+    } catch {
       setUploadStatus({ type: 'error', message: 'Connection error during upload.' });
     }
   };
 
+  // ─── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex h-screen bg-slate-950 text-slate-200 font-sans overflow-hidden">
-      
+
       {/* SIDEBAR */}
-      <aside className="w-80 bg-slate-900 border-r border-slate-800 p-6 flex flex-col relative z-20">
+      <aside className="w-72 bg-slate-900 border-r border-slate-800 p-6 flex flex-col shrink-0">
         <div className="flex items-center gap-3 mb-10">
-          <BrainCircuit className="w-8 h-8 text-blue-500" />
-          <h1 className="text-2xl font-bold text-white tracking-tight">Research Assistant</h1>
+          <BrainCircuit className="w-7 h-7 text-blue-500" />
+          <h1 className="text-xl font-bold text-white tracking-tight">A.R.I.A.</h1>
         </div>
 
-        <div className="mb-10 flex flex-col gap-2">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">Menu</h2>
-          <Link href="/" className="flex items-center gap-3 px-4 py-3 bg-blue-600/10 text-blue-400 rounded-xl font-medium border border-blue-500/20 transition-colors">
-            <LayoutDashboard className="w-5 h-5" />
-            New Research
+        <nav className="flex flex-col gap-1.5 mb-8">
+          <Link href="/" className="flex items-center gap-3 px-4 py-2.5 bg-blue-600/10 text-blue-400 rounded-xl font-medium border border-blue-500/20">
+            <LayoutDashboard className="w-4 h-4" /> New Research
           </Link>
-          <Link href="/history" className="flex items-center gap-3 px-4 py-3 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl font-medium transition-colors">
-            <Library className="w-5 h-5" />
-            Research Library
+          <Link href="/history" className="flex items-center gap-3 px-4 py-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl font-medium transition-colors">
+            <Library className="w-4 h-4" /> Research Library
           </Link>
-        </div>
+        </nav>
 
-        <div className="mt-auto mb-6">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Knowledge Base</h2>
-          <label className="cursor-pointer flex flex-col items-center justify-center w-full h-36 border-2 border-slate-700 border-dashed rounded-xl hover:bg-slate-800 hover:border-blue-500 transition-all duration-200 group">
-            <UploadCloud className="w-8 h-8 text-slate-500 group-hover:text-blue-400 mb-2 transition-colors" />
+        <div className="mt-auto">
+          <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-3">Knowledge Base</p>
+          <label className="cursor-pointer flex flex-col items-center justify-center w-full h-32 border-2 border-slate-700 border-dashed rounded-xl hover:bg-slate-800 hover:border-blue-500 transition-all group">
+            <UploadCloud className="w-7 h-7 text-slate-500 group-hover:text-blue-400 mb-1.5 transition-colors" />
             <p className="text-sm font-medium text-slate-300">Upload PDF to RAG</p>
-            <p className="text-xs text-slate-500 mt-1">Updates local Vector DB</p>
+            <p className="text-xs text-slate-500 mt-0.5">Updates local Vector DB</p>
             <input type="file" className="hidden" accept=".pdf" onChange={handleFileUpload} />
           </label>
           {uploadStatus.type !== 'idle' && (
-            <div className={`mt-4 p-3 rounded-lg flex items-start gap-2 text-sm ${uploadStatus.type === 'loading' ? 'bg-blue-900/20 text-blue-400 border border-blue-900/50' : uploadStatus.type === 'success' ? 'bg-emerald-900/20 text-emerald-400 border border-emerald-900/50' : 'bg-red-900/20 text-red-400 border border-red-900/50'}`}>
-              {uploadStatus.type === 'loading' && <Loader2 className="w-4 h-4 animate-spin mt-0.5" />}
-              {uploadStatus.type === 'success' && <CheckCircle2 className="w-4 h-4 mt-0.5" />}
-              {uploadStatus.type === 'error' && <AlertTriangle className="w-4 h-4 mt-0.5" />}
-              <span className="leading-tight">{uploadStatus.message}</span>
+            <div className={`mt-3 p-3 rounded-lg flex items-start gap-2 text-xs ${
+              uploadStatus.type === 'loading' ? 'bg-blue-900/20 text-blue-400 border border-blue-900/50'
+              : uploadStatus.type === 'success' ? 'bg-emerald-900/20 text-emerald-400 border border-emerald-900/50'
+              : 'bg-red-900/20 text-red-400 border border-red-900/50'
+            }`}>
+              {uploadStatus.type === 'loading' && <Loader2 className="w-3.5 h-3.5 animate-spin mt-0.5" />}
+              {uploadStatus.type === 'success' && <CheckCircle2 className="w-3.5 h-3.5 mt-0.5" />}
+              {uploadStatus.type === 'error'   && <AlertTriangle className="w-3.5 h-3.5 mt-0.5" />}
+              <span>{uploadStatus.message}</span>
             </div>
           )}
         </div>
       </aside>
 
-      {/* MAIN CONTENT AREA */}
-      <main className="flex-1 flex flex-col h-full relative">
-        <div className="flex-1 overflow-y-auto p-10 pb-40 relative z-10">
-          <div className="max-w-4xl mx-auto">
-            
-            {!report && !isLoading && logs.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-full mt-32 text-center animate-in fade-in duration-500">
-                <FileText className="w-16 h-16 text-slate-800 mb-6" />
-                <h2 className="text-3xl font-bold text-white mb-2">Initialize Research</h2>
-                <p className="text-slate-400 max-w-md">Enter a topic below. The agent will autonomously navigate the web, compile data, and synthesize a cited report.</p>
-              </div>
-            )}
+      {/* CHAT AREA */}
+      <main className="flex-1 flex flex-col h-full overflow-hidden">
 
-            {/* NEW: Collapsible Terminal - Renders if logs exist, regardless of loading state */}
-            {logs.length > 0 && (
-              <div className="mt-8 mb-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                {isLoading && (
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="relative">
-                      <div className="absolute inset-0 bg-blue-500 blur-md opacity-40 rounded-full"></div>
-                      <Loader2 className="w-6 h-6 text-blue-400 animate-spin relative z-10" />
-                    </div>
-                    <h3 className="text-xl font-bold text-white tracking-tight">Agentic Workflow Active</h3>
-                  </div>
-                )}
-                
-                <div className="bg-slate-950 border border-slate-800 rounded-xl shadow-2xl transition-all duration-300">
-                  <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 flex items-center justify-between rounded-t-xl">
-                    <div className="flex items-center gap-2">
-                      <Terminal className="w-4 h-4 text-slate-500" />
-                      <span className="text-xs font-mono text-slate-400">langgraph-orchestrator.log</span>
-                      {isLoading && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-2" />}
-                    </div>
-                    <button 
-                      onClick={() => setIsLogsMinimized(!isLogsMinimized)}
-                      className="text-slate-500 hover:text-white text-xs px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 transition"
-                    >
-                      {isLogsMinimized ? "Expand Logs" : "Minimize Logs"}
-                    </button>
-                  </div>
-                  
-                  {!isLogsMinimized && (
-                    <div className="p-6 h-72 overflow-y-auto font-mono text-xs md:text-sm flex flex-col gap-2 rounded-b-xl">
-                      {logs.map((log, index) => (
-                        <div 
-                          key={index} 
-                          className={`animate-in fade-in duration-300 ${log.message.includes('[Fatal Error]') ? 'text-red-400' : log.message.includes('Cache hit') ? 'text-emerald-400' : 'text-blue-300'}`}
-                        >
-                          <span className="text-slate-600 mr-3">[{log.time}]</span>
-                          {log.message}
-                        </div>
-                      ))}
-                      <div ref={logsEndRef} />
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+        {/* Message list */}
+        <div className="flex-1 overflow-y-auto px-6 py-8 space-y-8">
 
-            {/* VERCEL-STYLE TELEMETRY DASHBOARD */}
-            {telemetry && report && !isLoading && (
-              <div className="mb-8 grid grid-cols-4 gap-4 animate-in fade-in slide-in-from-bottom-2 duration-500">
-                <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
-                  <div className="p-3 bg-blue-900/20 text-blue-400 rounded-lg">
-                    <Timer className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-0.5">Execution Time</div>
-                    <div className="text-xl font-semibold text-white">{telemetry.execution_time}s</div>
-                  </div>
-                </div>
+          {messages.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-full text-center">
+              <FileText className="w-14 h-14 text-slate-800 mb-5" />
+              <h2 className="text-2xl font-bold text-white mb-2">Start a Research Session</h2>
+              <p className="text-slate-400 max-w-sm text-sm">
+                Ask anything. A.R.I.A. will search the web, pull academic papers, and synthesize a cited report.
+                Follow-up questions are supported.
+              </p>
+            </div>
+          )}
 
-                <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
-                  <div className="p-3 bg-indigo-900/20 text-indigo-400 rounded-lg">
-                    <Activity className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-0.5">API Calls</div>
-                    <div className="text-xl font-semibold text-white">{telemetry.api_calls}</div>
-                  </div>
+          {messages.map(msg => (
+            <div key={msg.id} className={`flex ${ msg.role === 'user' ? 'justify-end' : 'justify-start' }`}>
+              {msg.role === 'user' ? (
+                <div className="max-w-xl bg-blue-600/20 border border-blue-500/30 text-slate-200 rounded-2xl rounded-tr-sm px-5 py-3 text-sm leading-relaxed">
+                  {msg.text}
                 </div>
+              ) : (
+                <AssistantBubble msg={msg} onDownload={handleDownload} />
+              )}
+            </div>
+          ))}
 
-                <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
-                  <div className="p-3 bg-emerald-900/20 text-emerald-400 rounded-lg">
-                    <Database className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-0.5">Cache Hits</div>
-                    <div className="text-xl font-semibold text-white">{telemetry.cache_hits}</div>
-                  </div>
-                </div>
-
-                <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
-                  <div className="p-3 bg-amber-900/20 text-amber-400 rounded-lg">
-                    <Cpu className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <div className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-0.5">Tokens Saved</div>
-                    <div className="text-xl font-semibold text-white">~{telemetry.tokens_saved.toLocaleString()}</div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* FINAL REPORT */}
-            {report && !isLoading && (
-              <div className="bg-slate-900 p-10 rounded-2xl border border-slate-800 shadow-xl animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="flex items-start justify-between border-b border-slate-800 pb-6 mb-6">
-                  <div>
-                    <span className="text-xs font-bold text-blue-500 uppercase tracking-widest mb-2 block">Final Report</span>
-                    <h2 className="text-3xl font-bold text-white capitalize leading-snug">{cleanTitle}</h2>
-                  </div>
-                  <button 
-                    onClick={handleDownload}
-                    className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition-colors border border-slate-700 hover:border-slate-600"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span className="text-sm font-medium">Download</span>
-                  </button>
-                </div>
-                <div className="prose prose-invert prose-blue max-w-none prose-headings:text-slate-200 prose-a:text-blue-400 hover:prose-a:text-blue-300">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
-                </div>
-              </div>
-            )}
-          </div>
+          <div ref={bottomRef} />
         </div>
 
-        {/* INPUT DOCK */}
-        <div className="absolute bottom-0 w-full bg-gradient-to-t from-slate-950 via-slate-950 to-transparent pt-12 pb-8 px-10 z-20">
-          <div className="max-w-4xl mx-auto bg-slate-900 border border-slate-700 rounded-2xl p-4 shadow-2xl flex flex-col gap-3 transition-all focus-within:border-blue-500/50 focus-within:shadow-blue-900/20">
-            
-            <div className="flex px-2">
-              <input 
-                type="text" 
+        {/* INPUT DOCK — fixed to bottom of chat area */}
+        <div className="shrink-0 bg-gradient-to-t from-slate-950 via-slate-950/95 to-transparent pt-6 pb-6 px-6">
+          <div className="max-w-3xl mx-auto bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl transition-all focus-within:border-blue-500/50">
+
+            <div className="flex items-center px-5 pt-4 pb-2">
+              <input
+                ref={inputRef}
+                type="text"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleResearch()}
-                placeholder="What would you like to research today?" 
-                className="flex-1 bg-transparent border-none text-white text-lg focus:ring-0 outline-none placeholder-slate-500"
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleResearch()}
+                placeholder={isLoading ? 'Researching...' : messages.length > 0 ? 'Ask a follow-up question...' : 'What would you like to research?'}
+                className="flex-1 bg-transparent border-none text-white text-base focus:ring-0 outline-none placeholder-slate-500"
                 disabled={isLoading}
               />
             </div>
-            
-            <div className="flex items-center justify-between border-t border-slate-800 pt-3 mt-1 px-2 relative">
-              
-              <div className="relative" ref={dropdownRef}>
-                <button 
-                  onClick={() => setIsModeDropdownOpen(!isModeDropdownOpen)}
+
+            <div className="flex items-center justify-between border-t border-slate-800 px-4 py-2.5" ref={modeRef}>
+              {/* Mode selector */}
+              <div className="relative">
+                <button
+                  onClick={() => setIsModeOpen(o => !o)}
                   disabled={isLoading}
-                  className="flex items-center gap-2 px-3 py-2 bg-slate-950 hover:bg-slate-800 border border-slate-700 rounded-lg text-sm text-slate-300 transition-colors disabled:opacity-50"
+                  className="flex items-center gap-2 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-700 rounded-lg text-xs text-slate-300 transition-colors disabled:opacity-50"
                 >
-                  {mode === 'single' ? (
-                    <><Zap className="w-4 h-4 text-amber-400"/> Flash Agent</>
-                  ) : (
-                    <><BrainCircuit className="w-4 h-4 text-purple-400"/> Deep Parallel</>
-                  )}
-                  <ChevronDown className={`w-4 h-4 text-slate-500 transition-transform ${isModeDropdownOpen ? 'rotate-180' : ''}`} />
+                  {mode === 'single'
+                    ? <><Zap className="w-3.5 h-3.5 text-amber-400" /> Flash Agent</>
+                    : <><BrainCircuit className="w-3.5 h-3.5 text-purple-400" /> Deep Parallel</>}
+                  <ChevronDown className={`w-3.5 h-3.5 text-slate-500 transition-transform ${isModeOpen ? 'rotate-180' : ''}`} />
                 </button>
 
-                {isModeDropdownOpen && (
-                  <div className="absolute bottom-full left-0 mb-2 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
-                    <button 
-                      onClick={() => { setMode('single'); setIsModeDropdownOpen(false); }} 
-                      className={`w-full text-left px-4 py-3 hover:bg-slate-700 flex items-start gap-3 transition-colors border-b border-slate-700 ${mode === 'single' ? 'bg-slate-700/50' : ''}`}
-                    >
-                      <Zap className="w-5 h-5 text-amber-400 mt-0.5" />
-                      <div>
-                        <div className="text-sm font-semibold text-white">Flash Agent</div>
-                        <div className="text-xs text-slate-400 mt-0.5">Iterative loop. Fast & efficient.</div>
-                      </div>
-                    </button>
-                    <button 
-                      onClick={() => { setMode('deep'); setIsModeDropdownOpen(false); }} 
-                      className={`w-full text-left px-4 py-3 hover:bg-slate-700 flex items-start gap-3 transition-colors ${mode === 'deep' ? 'bg-slate-700/50' : ''}`}
-                    >
-                      <BrainCircuit className="w-5 h-5 text-purple-400 mt-0.5" />
-                      <div>
-                        <div className="text-sm font-semibold text-white">Deep Parallel</div>
-                        <div className="text-xs text-slate-400 mt-0.5">Multi-agent architecture. Highly detailed.</div>
-                      </div>
-                    </button>
+                {isModeOpen && (
+                  <div className="absolute bottom-full left-0 mb-2 w-56 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden z-50">
+                    {[
+                      { value: 'single', icon: <Zap className="w-4 h-4 text-amber-400" />, label: 'Flash Agent',    desc: 'Iterative loop. Fast & efficient.' },
+                      { value: 'deep',   icon: <BrainCircuit className="w-4 h-4 text-purple-400" />, label: 'Deep Parallel', desc: 'Multi-agent. Highly detailed.' },
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        onClick={() => { setMode(opt.value); setIsModeOpen(false); }}
+                        className={`w-full text-left px-4 py-3 hover:bg-slate-700 flex items-start gap-3 transition-colors border-b border-slate-700 last:border-0 ${ mode === opt.value ? 'bg-slate-700/50' : '' }`}
+                      >
+                        {opt.icon}
+                        <div>
+                          <div className="text-sm font-semibold text-white">{opt.label}</div>
+                          <div className="text-xs text-slate-400 mt-0.5">{opt.desc}</div>
+                        </div>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
 
-              <button 
-                onClick={handleResearch} 
-                disabled={isLoading || !query.trim()} 
-                className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-semibold rounded-xl px-6 py-2 transition-all flex items-center gap-2"
+              {/* Send button */}
+              <button
+                onClick={handleResearch}
+                disabled={isLoading || !query.trim()}
+                className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-semibold rounded-xl px-5 py-2 text-sm transition-all"
               >
-                {isLoading ? 'Processing...' : 'Research'}
-                {!isLoading && <Send className="w-4 h-4" />}
+                {isLoading
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Researching...</>
+                  : <><Send className="w-4 h-4" /> Research</>}
               </button>
             </div>
-
           </div>
         </div>
       </main>

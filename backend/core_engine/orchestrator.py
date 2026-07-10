@@ -24,6 +24,7 @@ import uuid
 from langgraph.checkpoint.memory import MemorySaver
 
 from core_engine.nodes.strategy_planner import strategy_planner_node
+from core_engine.nodes.intent_classifier import classify_intent, CONVERSATIONAL, DEEP_RESEARCH
 from core_engine.loop_worker import build_loop_worker, ResearchState
 from core_engine.llm_router import LLMRouter
 from core_engine.session_memory import SessionStore, format_messages_for_prompt
@@ -41,6 +42,22 @@ ASSURANCE_PROMPT = (
     "or their uploaded documents). Start with a phrase like \"I'll\". "
     "Return plain text only: no markdown, no lists, no emojis."
 )
+
+
+def _merge_matrices(matrices: list) -> list:
+    """Merge per-section extraction matrices, deduplicating by (title, url_or_source)."""
+    merged, seen = [], set()
+    for matrix in matrices:
+        for record in matrix or []:
+            key = (
+                str(record.get("title", "")).strip().lower(),
+                str(record.get("url_or_source", "")).strip().lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(record)
+    return merged
 
 
 def _chunk_text(chunk) -> str:
@@ -82,7 +99,7 @@ class ResearchOrchestrator:
         stream_id: str | None = None,
         chat_history: list | None = None,
         session_id: str | None = None,
-    ) -> str:
+    ) -> tuple[str, list]:
         async with semaphore:
             initial_state: ResearchState = {
                 "query": overall_query,
@@ -95,6 +112,10 @@ class ResearchOrchestrator:
                 "completed_sections": [],
                 "loop_count": 0,
                 "chat_history": chat_history or [],
+                # Deep-mode section workers are always research runs: preset the
+                # route so the Intent Classifier skips its LLM call.
+                "intent_route": DEEP_RESEARCH,
+                "extraction_matrix": [],
             }
 
             print(f"\U0001f9f5 [Worker Spawned] Starting research loop for: '{section_title}'")
@@ -106,14 +127,17 @@ class ResearchOrchestrator:
             final_state = await self.worker_graph.ainvoke(
                 initial_state, config=self._thread_config(session_id)
             )
-            return final_state["completed_sections"][0]
+            return (
+                final_state["completed_sections"][0],
+                final_state.get("extraction_matrix") or [],
+            )
 
     async def run_deep_research(
         self,
         query: str,
         progress_queue: asyncio.Queue | None = None,
         session_id: str | None = None,
-    ) -> str:
+    ) -> dict:
         print(f"\n\U0001f680 [Orchestrator] Starting Deep Research for: '{query}'\n")
 
         stream_id = None
@@ -152,7 +176,7 @@ class ResearchOrchestrator:
             print("\n\u26a1 [Orchestrator] Firing parallel research loops...\n")
 
             try:
-                completed_sections = await asyncio.gather(*tasks)
+                section_results = await asyncio.gather(*tasks)
             except Exception as e:
                 print(f"\n\U0001f6a8 [Orchestrator] CRITICAL WORKER FAILURE: {str(e)}")
                 for t in tasks:
@@ -162,15 +186,22 @@ class ResearchOrchestrator:
 
             print("\n\U0001f4da [Orchestrator] All workers finished. Compiling final report...\n")
 
+            completed_sections = [result[0] for result in section_results]
+            # Unify the per-section extraction matrices into one deduplicated grid.
+            extraction_matrix = _merge_matrices([result[1] for result in section_results])
+
             final_report = f"# {report_plan.report_title}\n\n"
             final_report += f"**Background Context:**\n{report_plan.background_context}\n\n"
             final_report += "---\n\n"
             final_report += "\n\n".join(completed_sections)
 
             # Record this turn so follow-up questions can reference the report.
-            self.sessions.append_turn(session_id, query, final_report)
+            self.sessions.append_turn(
+                session_id, query, final_report,
+                extraction_matrix=extraction_matrix, kind="research",
+            )
 
-            return final_report
+            return {"report": final_report, "extraction_matrix": extraction_matrix, "kind": "research"}
         finally:
             if stream_id:
                 release_progress_stream(stream_id)
@@ -181,7 +212,8 @@ class ResearchOrchestrator:
         progress_queue: asyncio.Queue | None = None,
         session_id: str | None = None,
         target_doc_id: str | None = None,
-    ) -> str:
+        intent_route: str | None = None,
+    ) -> dict:
         print(f"\n\U0001f680 [Orchestrator] Starting Single Iterative Research for: '{query}'\n")
 
         initial_state: ResearchState = {
@@ -195,18 +227,28 @@ class ResearchOrchestrator:
             "completed_sections": [],
             "loop_count": 0,
             "chat_history": self.sessions.get_messages(session_id),
+            "extraction_matrix": [],
         }
+
+        if intent_route in (CONVERSATIONAL, DEEP_RESEARCH):
+            # Preset by the streaming intent gate: the graph's Intent Classifier
+            # will respect this and skip its own LLM call.
+            initial_state["intent_route"] = intent_route
 
         if target_doc_id:
             # "Chat with Paper": scope this entire run to one ingested document.
             # The Tool Router bypasses external search tools accordingly.
             initial_state["target_doc_id"] = target_doc_id
+            initial_state["intent_route"] = DEEP_RESEARCH
 
         stream_id = None
         if progress_queue is not None:
             stream_id = register_progress_stream(progress_queue)
             initial_state["progress_stream_id"] = stream_id
-            progress_queue.put_nowait(sanitize_status("[Orchestrator] Starting single-agent iterative research."))
+            if intent_route == CONVERSATIONAL:
+                progress_queue.put_nowait(sanitize_status("[Orchestrator] Composing a conversational reply."))
+            else:
+                progress_queue.put_nowait(sanitize_status("[Orchestrator] Starting single-agent iterative research."))
 
         try:
             final_state = await self.worker_graph.ainvoke(
@@ -217,11 +259,17 @@ class ResearchOrchestrator:
                 release_progress_stream(stream_id)
 
         report = final_state["completed_sections"][0]
+        extraction_matrix = final_state.get("extraction_matrix") or []
+        kind = "chat" if final_state.get("intent_route") == CONVERSATIONAL else "research"
 
-        # Record this turn so follow-up questions can reference the report.
-        self.sessions.append_turn(session_id, query, report)
+        # Record this turn (bubble + matrix) so follow-ups and the session
+        # timeline can reference it.
+        self.sessions.append_turn(
+            session_id, query, report,
+            extraction_matrix=extraction_matrix, kind=kind,
+        )
 
-        return report
+        return {"report": report, "extraction_matrix": extraction_matrix, "kind": kind}
 
     async def _assurance_stream(self, query: str, session_id: str | None = None):
         """
@@ -272,32 +320,49 @@ class ResearchOrchestrator:
         cache_hits = 0
         api_calls = 0
 
-        if mode == "single":
-            research_task = asyncio.create_task(
-                self.run_single_research(query, progress_queue, session_id, target_doc_id)
-            )
-        elif mode == "deep":
-            research_task = asyncio.create_task(
-                self.run_deep_research(query, progress_queue, session_id)
-            )
-        else:
+        if mode not in ("single", "deep"):
             yield {"event": "error", "data": "Invalid mode. Use 'single' or 'deep'."}
             return
 
-        # 1. ASSURANCE FIRST: the workers are already spinning up in the background
-        # while we stream the instant intent acknowledgment to the user.
+        # 0. INTENT GATE: classify before launching the pipeline so greetings and
+        # conversational follow-ups never trigger assurance text or tool loops.
         if target_doc_id:
-            # Document focus mode: deterministic assurance (no LLM call) so the
-            # message accurately reflects the isolated single-paper scope.
-            focused_assurance = (
-                "I'll answer this using only your pinned document, retrieving "
-                "and citing the most relevant passages from that paper."
-            )
-            for word in focused_assurance.split(" "):
-                yield {"event": "assurance", "data": word + " "}
+            route = DEEP_RESEARCH
         else:
-            async for token in self._assurance_stream(query, session_id):
-                yield {"event": "assurance", "data": token}
+            route = await classify_intent(query, self.sessions.get_messages(session_id))
+
+        if route == CONVERSATIONAL:
+            research_task = asyncio.create_task(
+                self.run_single_research(
+                    query, progress_queue, session_id, None, intent_route=CONVERSATIONAL
+                )
+            )
+        elif mode == "single":
+            research_task = asyncio.create_task(
+                self.run_single_research(
+                    query, progress_queue, session_id, target_doc_id, intent_route=DEEP_RESEARCH
+                )
+            )
+        else:
+            research_task = asyncio.create_task(
+                self.run_deep_research(query, progress_queue, session_id)
+            )
+
+        # 1. ASSURANCE FIRST (research routes only): the workers are already
+        # spinning up in the background while we stream the acknowledgment.
+        if route != CONVERSATIONAL:
+            if target_doc_id:
+                # Document focus mode: deterministic assurance (no LLM call) so the
+                # message accurately reflects the isolated single-paper scope.
+                focused_assurance = (
+                    "I'll answer this using only your pinned document, retrieving "
+                    "and citing the most relevant passages from that paper."
+                )
+                for word in focused_assurance.split(" "):
+                    yield {"event": "assurance", "data": word + " "}
+            else:
+                async for token in self._assurance_stream(query, session_id):
+                    yield {"event": "assurance", "data": token}
 
         # 2. LIVE PROGRESS + STRUCTURED TELEMETRY LOOP
         while not research_task.done():
@@ -333,7 +398,13 @@ class ResearchOrchestrator:
             yield {"event": "progress", "data": clean_msg}
 
         try:
-            report = await research_task
+            result = await research_task
+
+            if result["kind"] == "chat":
+                # Conversational turn: tokens already streamed as `message` events.
+                # Send the full reply so the frontend can finalize the bubble.
+                yield {"event": "complete", "data": result["report"]}
+                return
 
             # CALCULATE FINAL TELEMETRY
             execution_time = round(time.time() - start_time, 2)
@@ -347,7 +418,10 @@ class ResearchOrchestrator:
             })
 
             yield {"event": "telemetry", "data": telemetry_payload}
-            yield {"event": "complete", "data": report}
+            # Unified structured payload for the Elicit grid, delivered once at
+            # the end of the execution, right before the final report.
+            yield {"event": "matrix", "data": result["extraction_matrix"]}
+            yield {"event": "complete", "data": result["report"]}
 
         except Exception as e:
             yield {"event": "error", "data": sanitize_status(str(e))}

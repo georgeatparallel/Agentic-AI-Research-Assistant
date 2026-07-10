@@ -14,6 +14,8 @@ from langgraph.graph import StateGraph, END
 from core_engine.nodes.base_node import ResearchState
 
 # --- IMPORT THE GRAPH NODES ---
+from core_engine.nodes.intent_classifier import intent_classifier_node, CONVERSATIONAL
+from core_engine.nodes.conversational_node import conversational_node
 from core_engine.nodes.gap_analyzer import gap_analyzer_node
 from core_engine.nodes.tool_router import tool_router_node
 from core_engine.nodes.synthesizer import synthesizer_node
@@ -83,6 +85,17 @@ async def execute_tools_node(state: ResearchState):
 
 
 # --- 2. THE CONDITIONAL ROUTING LOGIC ---
+def route_by_intent(state: ResearchState):
+    """
+    Entry router driven by the Intent Classifier.
+    Conversational messages skip the research loop entirely and stream a
+    standard chat reply; everything else enters the Gap Analyzer loop.
+    """
+    if state.get("intent_route") == CONVERSATIONAL:
+        return "converse"
+    return "research"
+
+
 def check_research_status(state: ResearchState):
     """
     The traffic controller for the StateGraph.
@@ -129,13 +142,25 @@ def build_loop_worker(checkpointer=None):
     workflow = StateGraph(ResearchState)
     
     # 1. Register all nodes to the graph
+    workflow.add_node("classify_intent", intent_classifier_node)
+    workflow.add_node("converse", conversational_node)
     workflow.add_node("evaluate_gaps", gap_analyzer_node)
     workflow.add_node("route_tools", tool_router_node)
     workflow.add_node("execute_tools", execute_tools_node)
     workflow.add_node("synthesize", synthesizer_node)
     
-    # 2. Define the Entry Point
-    workflow.set_entry_point("evaluate_gaps")
+    # 2. Define the Entry Point: the Intent Classifier gates every run
+    workflow.set_entry_point("classify_intent")
+    
+    # 2b. Intent gate: chat replies short-circuit the research loop
+    workflow.add_conditional_edges(
+        "classify_intent",
+        route_by_intent,
+        {
+            "converse": "converse",
+            "research": "evaluate_gaps"
+        }
+    )
     
     # 3. Define the Dynamic/Conditional Edge
     # This determines whether we gather more data or write the final report
@@ -152,7 +177,8 @@ def build_loop_worker(checkpointer=None):
     workflow.add_edge("route_tools", "execute_tools")
     workflow.add_edge("execute_tools", "evaluate_gaps") # Close the loop
     
-    # 5. Define the Exit Point
+    # 5. Define the Exit Points
+    workflow.add_edge("converse", END)
     workflow.add_edge("synthesize", END)
     
     return workflow.compile(checkpointer=checkpointer)

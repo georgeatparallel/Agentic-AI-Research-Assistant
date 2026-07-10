@@ -8,7 +8,7 @@ circular dependency errors in Python.
 """
 
 import operator
-from typing import TypedDict, Annotated, List, Any, Optional
+from typing import TypedDict, Annotated, List, Any, Dict, Optional
 from typing_extensions import NotRequired
 
 from langgraph.graph.message import add_messages
@@ -63,3 +63,14 @@ class ResearchState(TypedDict):
     # this document ID's chunks. TypedDicts cannot carry runtime defaults, so
     # NotRequired[Optional[str]] is the schema equivalent of `= None`.
     target_doc_id: NotRequired[Optional[str]]
+
+    # 9. Intent Routing: Set by the Intent Classifier entry node. One of
+    # "CONVERSATIONAL" (chat reply path) or "DEEP_RESEARCH" (multi-agent loop).
+    # Orchestrators may preset this to skip re-classification (e.g. deep-mode
+    # section workers are always DEEP_RESEARCH).
+    intent_route: NotRequired[str]
+
+    # 10. Extraction Matrix: Structured per-document records produced by the
+    # Synthesizer (Elicit-style grid). Each record carries: title,
+    # url_or_source, abstract_summary, methodology, sample_size, key_findings.
+    extraction_matrix: NotRequired[List[Dict[str, Any]]]

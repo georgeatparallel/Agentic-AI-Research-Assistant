@@ -56,13 +56,18 @@ async def generate_research(request: ResearchRequest):
         
     try:
         if request.mode == "single":
-            report = await orchestrator.run_single_research(request.query, session_id=request.session_id)
+            result = await orchestrator.run_single_research(request.query, session_id=request.session_id)
         elif request.mode == "deep":
-            report = await orchestrator.run_deep_research(request.query, session_id=request.session_id)
+            result = await orchestrator.run_deep_research(request.query, session_id=request.session_id)
         else:
             raise HTTPException(status_code=400, detail="Invalid mode. Use 'single' or 'deep'.")
             
-        return {"status": "success", "report": report}
+        return {
+            "status": "success",
+            "report": result["report"],
+            "extraction_matrix": result["extraction_matrix"],
+            "kind": result["kind"],
+        }
     
     except Exception as e:
         print(f"\u274c API Error: {str(e)}")
@@ -94,6 +99,15 @@ async def research_event_stream(
                 # Structured JSON packet describing the exact concurrent tool
                 # queries selected by the Tool Router (rendered as an accordion).
                 yield format_sse_event("tool_telemetry", data)
+
+            elif event_type == "message":
+                # Conversational route: standard chat text tokens streamed as-is.
+                yield format_sse_event("message", data)
+
+            elif event_type == "matrix":
+                # The completed extraction matrix drops down at the end of the
+                # execution as one unified payload for the Elicit grid.
+                yield format_sse_event("matrix", {"extraction_matrix": data})
 
             elif event_type == "progress":
                 yield format_sse_event("progress", {"message": sanitize_status(data)})
@@ -159,6 +173,22 @@ async def stream_paper_research(request: PaperResearchRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# --- 1c. SESSION TIMELINE ENDPOINTS ---
+@app.get("/api/sessions")
+async def list_sessions():
+    """List recent chat session summaries for the sidebar."""
+    return {"sessions": orchestrator.sessions.list_sessions()}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Return the full timeline (chat bubbles + extraction matrices) for one session."""
+    timeline = orchestrator.sessions.get_timeline(session_id)
+    if timeline is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return timeline
 
 
 # --- 2. RAG UPLOAD ENDPOINT ---

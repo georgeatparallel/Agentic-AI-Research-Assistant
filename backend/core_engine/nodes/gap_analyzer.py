@@ -52,7 +52,7 @@ async def gap_analyzer_node(state: dict):
     conversation = format_messages_for_prompt(state.get("chat_history", []) or [])
     emit_progress(state, "[Gap Analyzer] Evaluating research coverage and identifying missing information.")
     
-    print(f"\ud83d\udd0d [Gap Analyzer] Evaluating research state for: '{current_section}'")
+    print(f"\U0001f50d [Gap Analyzer] Evaluating research state for: '{current_section}'")
     
     # THROTTLE: Artificially delay execution by 4 seconds to protect the Gemini 15 RPM Free Tier Limit.
     # This prevents the SQLite cache from triggering a 429 Quota Error on rapid repeat searches.

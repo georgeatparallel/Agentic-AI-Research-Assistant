@@ -8,7 +8,7 @@ import {
   BrainCircuit, UploadCloud, Send, Loader2, CheckCircle2, AlertTriangle,
   FileText, Download, ChevronDown, ChevronRight, Check,
   Search, BookOpen, Globe, Database, Timer, Activity, Cpu, Pin, X,
-  MessageSquare, Plus, Table2, Clock, Book, Bell, FileSearch, ListChecks, Sparkles,
+  MessageSquare, Plus, Table2, Clock, Book, Bell, FileSearch, ListChecks, Sparkles, Trash2,
 } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
@@ -322,9 +322,113 @@ function AssistantBubble({ msg, onDownload, onPinDoc }: { msg: ChatMessage; onDo
 
 // \u2500\u2500\u2500 Elicit Command Bar \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
+function PaperSelectorModal({
+  documents,
+  activeDocumentId,
+  onClose,
+  onConfirm,
+}: {
+  documents: UploadedDoc[];
+  activeDocumentId: string | null;
+  onClose: () => void;
+  onConfirm: (document: UploadedDoc) => void;
+}) {
+  const [selectedDocumentId, setSelectedDocumentId] = useState(
+    activeDocumentId ?? documents[0]?.docId ?? ''
+  );
+  const selectedDocument = documents.find(document => document.docId === selectedDocumentId);
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/35 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="paper-selector-title"
+      onMouseDown={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
+        onMouseDown={event => event.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-teal-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-teal-700">
+              <MessageSquare className="h-3 w-3" /> Paper focus
+            </span>
+            <h2 id="paper-selector-title" className="mt-3 text-xl font-semibold tracking-tight text-[#0F172A]">
+              Choose a paper to chat with
+            </h2>
+            <p className="mt-1 text-sm leading-relaxed text-slate-500">
+              Answers will be grounded in the selected document from your knowledge base.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-[#0F172A]"
+            aria-label="Close paper selector"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {documents.length > 0 ? (
+          <div className="mt-5 max-h-64 space-y-2 overflow-y-auto pr-1">
+            {documents.map(document => {
+              const isSelected = document.docId === selectedDocumentId;
+              return (
+                <button
+                  key={document.docId}
+                  type="button"
+                  onClick={() => setSelectedDocumentId(document.docId)}
+                  className={`flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${
+                    isSelected
+                      ? 'border-teal-500 bg-teal-50 text-teal-900'
+                      : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${isSelected ? 'bg-teal-100 text-teal-700' : 'bg-slate-100 text-slate-500'}`}>
+                    <FileText className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{document.name}</span>
+                  {isSelected && <Check className="h-4 w-4 shrink-0 text-teal-600" />}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center">
+            <FileText className="mx-auto h-6 w-6 text-slate-400" />
+            <p className="mt-2 text-sm font-medium text-slate-700">No papers available yet</p>
+            <p className="mt-1 text-xs text-slate-500">Upload a PDF to the knowledge base, then select it here.</p>
+          </div>
+        )}
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50 hover:text-[#0F172A]"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => selectedDocument && onConfirm(selectedDocument)}
+            disabled={!selectedDocument}
+            className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+          >
+            Chat with selected paper
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CommandBar({
   query, setQuery, workflow, setWorkflow, onSubmit, isLoading,
-  pinnedDoc, onClearPin, inputRef,
+  pinnedDoc, onClearPin, onOpenPaperSelector, inputRef,
 }: {
   query: string;
   setQuery: (v: string) => void;
@@ -334,6 +438,7 @@ function CommandBar({
   isLoading: boolean;
   pinnedDoc: UploadedDoc | null;
   onClearPin: () => void;
+  onOpenPaperSelector: () => void;
   inputRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const [open, setOpen] = useState(false);
@@ -413,7 +518,15 @@ function CommandBar({
                   {WORKFLOW_OPTIONS.filter(o => o.group === group).map(opt => (
                     <button
                       key={opt.value}
-                      onClick={() => { setWorkflow(opt.value); setOpen(false); }}
+                      type="button"
+                      onClick={() => {
+                        setOpen(false);
+                        if (opt.value === 'chat_with_papers') {
+                          onOpenPaperSelector();
+                          return;
+                        }
+                        setWorkflow(opt.value);
+                      }}
                       className={`w-full text-left px-4 py-2.5 flex items-start gap-3 transition-colors ${
                         workflow === opt.value ? 'bg-teal-50' : 'hover:bg-slate-50'
                       }`}
@@ -465,6 +578,7 @@ export default function AgenticChat() {
 
   const [uploadedDocs, setUploadedDocs] = useState<UploadedDoc[]>([]);
   const [pinnedDoc, setPinnedDoc] = useState<UploadedDoc | null>(null);
+  const [isPaperSelectorOpen, setIsPaperSelectorOpen] = useState(false);
 
   const [recentSessions, setRecentSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState('');
@@ -534,6 +648,18 @@ export default function AgenticChat() {
   const pinDocById = (docId: string) => {
     const doc = uploadedDocs.find(d => d.docId === docId);
     setPinnedDoc(doc ?? { docId, name: 'pinned paper' });
+    setWorkflow('chat_with_papers');
+    inputRef.current?.focus();
+  };
+
+  const openPaperSelector = () => {
+    if (!isLoading) setIsPaperSelectorOpen(true);
+  };
+
+  const confirmPaperSelection = (document: UploadedDoc) => {
+    setPinnedDoc(document);
+    setWorkflow('chat_with_papers');
+    setIsPaperSelectorOpen(false);
     inputRef.current?.focus();
   };
 
@@ -544,6 +670,7 @@ export default function AgenticChat() {
     sessionIdRef.current = id;
     setActiveSessionId(id);
     setPinnedDoc(null);
+    setWorkflow('find_papers');
     setMessages(session.messages.map(normalizeMessage));
     inputRef.current?.focus();
   };
@@ -553,8 +680,21 @@ export default function AgenticChat() {
     sessionIdRef.current = generateId();
     setActiveSessionId(sessionIdRef.current);
     setMessages([]);
+    setQuery('');
     setPinnedDoc(null);
+    setWorkflow('find_papers');
+    setUploadStatus({ type: 'idle', message: '' });
+    setIsPaperSelectorOpen(false);
     inputRef.current?.focus();
+  };
+
+  const deleteSession = (id: string) => {
+    if (isLoading) return;
+    const nextSessions = readStoredSessions().filter(session => session.id !== id);
+    localStorage.setItem(SESSIONS_KEY, JSON.stringify(nextSessions));
+    setRecentSessions(nextSessions.map(({ id: sessionId, title, updatedAt }) => ({ id: sessionId, title, updatedAt })));
+
+    if (id === sessionIdRef.current) startNewSession();
   };
 
   const handleResearch = async () => {
@@ -720,9 +860,20 @@ export default function AgenticChat() {
 
       {/* SIDEBAR */}
       <aside className="w-72 bg-slate-50 border-r border-slate-200 p-5 flex flex-col shrink-0">
-        <div className="flex items-center gap-3 mb-6">
-          <BrainCircuit className="w-7 h-7 text-teal-600" />
-          <h1 className="text-xl font-bold text-[#0F172A] tracking-tight">A.R.I.A.</h1>
+        <div className="flex items-center gap-2 mb-6">
+          <svg
+            viewBox="0 0 32 32"
+            fill="none"
+            aria-hidden="true"
+            className="h-7 w-7 shrink-0 text-teal-600"
+          >
+            <path d="M8 6.5h11l5 5V25.5H8V6.5Z" stroke="currentColor" strokeWidth="2.25" strokeLinejoin="round" />
+            <path d="M19 6.5v5h5" stroke="currentColor" strokeWidth="2.25" strokeLinejoin="round" />
+            <path d="M12 17h8M12 21h5" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" />
+            <circle cx="23.5" cy="8.5" r="3.25" fill="currentColor" className="text-teal-500" />
+            <path d="M23.5 6.8v3.4M21.8 8.5h3.4" stroke="white" strokeWidth="1.15" strokeLinecap="round" />
+          </svg>
+          <h1 className="text-xl font-extrabold tracking-tight text-[#0F172A]">researchmate.ai</h1>
         </div>
 
         <nav className="flex flex-col gap-1 mb-6">
@@ -754,25 +905,36 @@ export default function AgenticChat() {
                 <p className="text-xs text-slate-400 px-1">No sessions yet. Start researching!</p>
               )}
               {recentSessions.map(session => (
-                <button
-                  key={session.id}
-                  onClick={() => loadSession(session.id)}
-                  disabled={isLoading}
-                  className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors border disabled:opacity-50 ${
-                    session.id === activeSessionId
-                      ? 'bg-teal-50 border-teal-200 text-teal-800'
-                      : 'bg-transparent border-transparent text-slate-500 hover:bg-slate-100 hover:text-[#0F172A]'
-                  }`}
-                  title={session.title}
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <MessageSquare className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate text-xs font-medium">{session.title}</span>
-                  </span>
-                  <span className="block text-[10px] text-slate-400 mt-0.5 ml-5">
-                    {new Date(session.updatedAt).toLocaleString()}
-                  </span>
-                </button>
+                <div key={session.id} className="group flex items-stretch gap-1">
+                  <button
+                    onClick={() => loadSession(session.id)}
+                    disabled={isLoading}
+                    className={`min-w-0 flex-1 text-left px-3 py-2.5 rounded-lg transition-colors border disabled:opacity-50 ${
+                      session.id === activeSessionId
+                        ? 'bg-teal-50 border-teal-200 text-teal-800'
+                        : 'bg-transparent border-transparent text-slate-500 hover:bg-slate-100 hover:text-[#0F172A]'
+                    }`}
+                    title={session.title}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate text-xs font-medium">{session.title}</span>
+                    </span>
+                    <span className="block text-[10px] text-slate-400 mt-0.5 ml-5">
+                      {new Date(session.updatedAt).toLocaleString()}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteSession(session.id)}
+                    disabled={isLoading}
+                    className="shrink-0 self-center rounded-md p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500 focus:outline-none focus:ring-2 focus:ring-red-200 disabled:opacity-50"
+                    aria-label={`Delete ${session.title}`}
+                    title="Delete session"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -809,13 +971,6 @@ export default function AgenticChat() {
                     <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                     <span className="truncate">{doc.name}</span>
                   </span>
-                  <button
-                    onClick={() => { setPinnedDoc(doc); inputRef.current?.focus(); }}
-                    className="shrink-0 flex items-center gap-1 text-[10px] font-semibold text-teal-700 hover:text-teal-800 border border-teal-200 hover:border-teal-400 rounded-md px-2 py-1 transition-colors"
-                    title="Restrict your next questions to this document"
-                  >
-                    <Pin className="w-3 h-3" /> Chat with this paper
-                  </button>
                 </li>
               ))}
             </ul>
@@ -841,6 +996,7 @@ export default function AgenticChat() {
                 workflow={workflow} setWorkflow={setWorkflow}
                 onSubmit={handleResearch} isLoading={isLoading}
                 pinnedDoc={pinnedDoc} onClearPin={() => setPinnedDoc(null)}
+                onOpenPaperSelector={openPaperSelector}
                 inputRef={inputRef}
               />
             </div>
@@ -871,6 +1027,7 @@ export default function AgenticChat() {
                   workflow={workflow} setWorkflow={setWorkflow}
                   onSubmit={handleResearch} isLoading={isLoading}
                   pinnedDoc={pinnedDoc} onClearPin={() => setPinnedDoc(null)}
+                  onOpenPaperSelector={openPaperSelector}
                   inputRef={inputRef}
                 />
               </div>
@@ -878,6 +1035,15 @@ export default function AgenticChat() {
           </>
         )}
       </main>
+
+      {isPaperSelectorOpen && (
+        <PaperSelectorModal
+          documents={uploadedDocs}
+          activeDocumentId={pinnedDoc?.docId ?? null}
+          onClose={() => setIsPaperSelectorOpen(false)}
+          onConfirm={confirmPaperSelection}
+        />
+      )}
     </div>
   );
 }

@@ -8,7 +8,7 @@ circular dependency errors in Python.
 """
 
 import operator
-from typing import TypedDict, Annotated, List, Any
+from typing import TypedDict, Annotated, List, Any, Optional
 from typing_extensions import NotRequired
 
 from langgraph.graph.message import add_messages
@@ -56,3 +56,10 @@ class ResearchState(TypedDict):
     # Tracked with LangGraph's `add_messages` reducer so nodes can reference
     # previously generated reports when handling follow-up questions.
     chat_history: NotRequired[Annotated[List[Any], add_messages]]
+
+    # 8. Document Focus ("Chat with Paper"): When set, the Tool Router bypasses
+    # external search tools (web_searcher, web_crawler, arxiv_researcher) and
+    # routes exclusively to the local RAG retriever, with retrieval filtered to
+    # this document ID's chunks. TypedDicts cannot carry runtime defaults, so
+    # NotRequired[Optional[str]] is the schema equivalent of `= None`.
+    target_doc_id: NotRequired[Optional[str]]

@@ -7,14 +7,18 @@ import Link from 'next/link';
 import {
   BrainCircuit, UploadCloud, Send, Loader2, CheckCircle2, AlertTriangle,
   FileText, LayoutDashboard, Library, Download, ChevronDown, ChevronRight,
-  Zap, Search, BookOpen, Globe, Database, Timer, Activity, Cpu,
+  Zap, Search, BookOpen, Globe, Database, Timer, Activity, Cpu, Pin, X,
 } from 'lucide-react';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ToolTask = { tool: string; query: string };
+type ToolTask = { tool: string; query: string; doc_id?: string | null };
+
+// A PDF ingested into the local vector store, addressable for isolated
+// "Chat with Paper" runs via its backend-generated document ID.
+type UploadedDoc = { docId: string; name: string };
 
 type ToolTelemetryEvent = { count: number; tasks: ToolTask[] };
 
@@ -62,7 +66,7 @@ function generateId() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function ToolAccordion({ telemetry }: { telemetry: ToolTelemetryEvent }) {
+function ToolAccordion({ telemetry, onPinDoc }: { telemetry: ToolTelemetryEvent; onPinDoc?: (docId: string) => void }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-3 rounded-xl border border-slate-700 bg-slate-900/60 overflow-hidden">
@@ -86,7 +90,16 @@ function ToolAccordion({ telemetry }: { telemetry: ToolTelemetryEvent }) {
                 {TOOL_ICONS[t.tool] ?? <Search className="w-3.5 h-3.5" />}
                 {TOOL_LABELS[t.tool] ?? t.tool}
               </span>
-              <span className="text-xs text-slate-400 leading-relaxed">{t.query}</span>
+              <span className="flex-1 text-xs text-slate-400 leading-relaxed">{t.query}</span>
+              {t.doc_id && onPinDoc && (
+                <button
+                  onClick={() => onPinDoc(t.doc_id!)}
+                  className="shrink-0 flex items-center gap-1 text-[10px] font-semibold text-blue-400 hover:text-blue-300 border border-blue-500/30 hover:border-blue-400/50 rounded-md px-2 py-1 transition-colors"
+                  title="Restrict your next questions to this document"
+                >
+                  <Pin className="w-3 h-3" /> Chat with this paper
+                </button>
+              )}
             </li>
           ))}
         </ul>
@@ -116,7 +129,7 @@ function TelemetryBar({ data }: { data: TelemetryData }) {
   );
 }
 
-function AssistantBubble({ msg, onDownload }: { msg: ChatMessage; onDownload: (msg: ChatMessage) => void }) {
+function AssistantBubble({ msg, onDownload, onPinDoc }: { msg: ChatMessage; onDownload: (msg: ChatMessage) => void; onPinDoc?: (docId: string) => void }) {
   return (
     <div className="flex flex-col gap-1 max-w-3xl">
       <div className="flex items-center gap-2 mb-1">
@@ -135,7 +148,7 @@ function AssistantBubble({ msg, onDownload }: { msg: ChatMessage; onDownload: (m
       )}
 
       {/* Tool accordion */}
-      {msg.toolTelemetry && <ToolAccordion telemetry={msg.toolTelemetry} />}
+      {msg.toolTelemetry && <ToolAccordion telemetry={msg.toolTelemetry} onPinDoc={onPinDoc} />}
 
       {/* Streaming indicator while report is being written */}
       {msg.isStreaming && msg.toolTelemetry && !msg.report && (
@@ -180,6 +193,10 @@ export default function AgenticChat() {
   const [uploadStatus, setUploadStatus] = useState<{
     type: 'idle' | 'loading' | 'success' | 'error'; message: string;
   }>({ type: 'idle', message: '' });
+
+  // "Chat with Paper": documents ingested this session + the pinned focus doc.
+  const [uploadedDocs, setUploadedDocs] = useState<UploadedDoc[]>([]);
+  const [pinnedDoc, setPinnedDoc] = useState<UploadedDoc | null>(null);
 
   // Stable session id for the lifetime of this browser tab.
   const sessionIdRef = useRef<string>(generateId());
@@ -232,6 +249,14 @@ export default function AgenticChat() {
     []
   );
 
+  // Pin a document: subsequent submissions run in isolated "Chat with Paper"
+  // mode against this document only, until the pin is dismissed.
+  const pinDocById = (docId: string) => {
+    const doc = uploadedDocs.find(d => d.docId === docId);
+    setPinnedDoc(doc ?? { docId, name: 'pinned paper' });
+    inputRef.current?.focus();
+  };
+
   const handleResearch = async () => {
     const trimmed = query.trim();
     if (!trimmed || isLoading) return;
@@ -240,6 +265,7 @@ export default function AgenticChat() {
     const asstMsgId = generateId();
     const userQuery = trimmed;
     const currentMode = mode;
+    const focusDoc = pinnedDoc;
 
     setQuery('');
     setIsLoading(true);
@@ -258,14 +284,16 @@ export default function AgenticChat() {
     ]);
 
     try {
-      const response = await fetch(`${API_URL}/research-stream`, {
+      // Pinned paper focus routes to the isolated single-document endpoint.
+      const endpoint = focusDoc ? 'research-paper-stream' : 'research-stream';
+      const payload = focusDoc
+        ? { query: userQuery, session_id: sessionIdRef.current, target_doc_id: focusDoc.docId }
+        : { query: userQuery, mode: currentMode, session_id: sessionIdRef.current };
+
+      const response = await fetch(`${API_URL}/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: userQuery,
-          mode: currentMode,
-          session_id: sessionIdRef.current,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.body) throw new Error('No readable stream available.');
@@ -348,9 +376,15 @@ export default function AgenticChat() {
     try {
       const res  = await fetch(`${API_URL}/upload-pdf`, { method: 'POST', body: formData });
       const data = await res.json();
-      setUploadStatus(res.ok
-        ? { type: 'success', message: `${file.name} embedded!` }
-        : { type: 'error',   message: data.detail || 'Upload failed.' });
+      if (res.ok) {
+        setUploadStatus({ type: 'success', message: `${file.name} embedded!` });
+        // Register the doc so "Chat with this paper" can pin it.
+        if (data.doc_id) {
+          setUploadedDocs(prev => [{ docId: data.doc_id, name: data.filename || file.name }, ...prev]);
+        }
+      } else {
+        setUploadStatus({ type: 'error', message: data.detail || 'Upload failed.' });
+      }
     } catch {
       setUploadStatus({ type: 'error', message: 'Connection error during upload.' });
     }
@@ -397,6 +431,26 @@ export default function AgenticChat() {
               <span>{uploadStatus.message}</span>
             </div>
           )}
+
+          {uploadedDocs.length > 0 && (
+            <ul className="mt-4 flex flex-col gap-2">
+              {uploadedDocs.map(doc => (
+                <li key={doc.docId} className="flex items-center justify-between gap-2 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2">
+                  <span className="flex items-center gap-2 text-xs text-slate-300 min-w-0">
+                    <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span className="truncate">{doc.name}</span>
+                  </span>
+                  <button
+                    onClick={() => { setPinnedDoc(doc); inputRef.current?.focus(); }}
+                    className="shrink-0 flex items-center gap-1 text-[10px] font-semibold text-blue-400 hover:text-blue-300 border border-blue-500/30 hover:border-blue-400/50 rounded-md px-2 py-1 transition-colors"
+                    title="Restrict your next questions to this document"
+                  >
+                    <Pin className="w-3 h-3" /> Chat with this paper
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </aside>
 
@@ -424,7 +478,7 @@ export default function AgenticChat() {
                   {msg.text}
                 </div>
               ) : (
-                <AssistantBubble msg={msg} onDownload={handleDownload} />
+                <AssistantBubble msg={msg} onDownload={handleDownload} onPinDoc={pinDocById} />
               )}
             </div>
           ))}
@@ -436,6 +490,22 @@ export default function AgenticChat() {
         <div className="shrink-0 bg-gradient-to-t from-slate-950 via-slate-950/95 to-transparent pt-6 pb-6 px-6">
           <div className="max-w-3xl mx-auto bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl transition-all focus-within:border-blue-500/50">
 
+            {pinnedDoc && (
+              <div className="flex items-center justify-between px-5 pt-3">
+                <span className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-400 bg-blue-600/10 border border-blue-500/30 rounded-full px-3 py-1 min-w-0">
+                  <Pin className="w-3 h-3 shrink-0" />
+                  <span className="truncate">Focused on: {pinnedDoc.name}</span>
+                </span>
+                <button
+                  onClick={() => setPinnedDoc(null)}
+                  className="shrink-0 text-slate-500 hover:text-white transition-colors"
+                  title="Exit paper focus mode"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
             <div className="flex items-center px-5 pt-4 pb-2">
               <input
                 ref={inputRef}
@@ -443,7 +513,12 @@ export default function AgenticChat() {
                 value={query}
                 onChange={e => setQuery(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleResearch()}
-                placeholder={isLoading ? 'Researching...' : messages.length > 0 ? 'Ask a follow-up question...' : 'What would you like to research?'}
+                placeholder={
+                  isLoading ? 'Researching...'
+                  : pinnedDoc ? `Ask about "${pinnedDoc.name}" (paper focus mode)...`
+                  : messages.length > 0 ? 'Ask a follow-up question...'
+                  : 'What would you like to research?'
+                }
                 className="flex-1 bg-transparent border-none text-white text-base focus:ring-0 outline-none placeholder-slate-500"
                 disabled={isLoading}
               />
@@ -454,7 +529,7 @@ export default function AgenticChat() {
               <div className="relative">
                 <button
                   onClick={() => setIsModeOpen(o => !o)}
-                  disabled={isLoading}
+                  disabled={isLoading || !!pinnedDoc}
                   className="flex items-center gap-2 px-3 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-700 rounded-lg text-xs text-slate-300 transition-colors disabled:opacity-50"
                 >
                   {mode === 'single'

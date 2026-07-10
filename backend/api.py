@@ -40,6 +40,13 @@ class ResearchRequest(BaseModel):
     # chat and sends it with every turn so follow-ups reference prior reports.
     session_id: Optional[str] = None
 
+class PaperResearchRequest(BaseModel):
+    """Isolated "Chat with Paper" request: answers come only from one ingested document."""
+    query: str
+    # The document ID returned by /api/upload-pdf; retrieval is filtered to it.
+    target_doc_id: str
+    session_id: Optional[str] = None
+
 # --- 1. RESEARCH ENDPOINT ---
 @app.post("/api/research")
 async def generate_research(request: ResearchRequest):
@@ -66,10 +73,15 @@ def format_sse_event(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
 
-async def research_event_stream(request: ResearchRequest):
+async def research_event_stream(
+    query: str,
+    mode: str,
+    session_id: Optional[str] = None,
+    target_doc_id: Optional[str] = None,
+):
     """Yield assurance tokens, tool telemetry, progress updates, and the final report as SSE chunks."""
     try:
-        async for update in orchestrator.stream_research(request.query, request.mode, request.session_id):
+        async for update in orchestrator.stream_research(query, mode, session_id, target_doc_id):
             event_type = update["event"]
             data = update["data"]
 
@@ -113,7 +125,33 @@ async def stream_research(request: ResearchRequest):
         raise HTTPException(status_code=400, detail="Invalid mode. Use 'single' or 'deep'.")
 
     return StreamingResponse(
-        research_event_stream(request),
+        research_event_stream(request.query, request.mode, request.session_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# --- 1b. CHAT WITH PAPER ENDPOINT ---
+@app.post("/api/research-paper-stream")
+async def stream_paper_research(request: PaperResearchRequest):
+    """
+    Isolated "Chat with Paper" SSE stream.
+    Feeds `target_doc_id` into the initial LangGraph state so the Tool Router
+    bypasses all external search tools and answers exclusively from the local
+    RAG store, filtered to the pinned document.
+    """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Search query cannot be empty.")
+
+    if not request.target_doc_id.strip():
+        raise HTTPException(status_code=400, detail="target_doc_id is required for paper-focused research.")
+
+    return StreamingResponse(
+        research_event_stream(request.query, "single", request.session_id, request.target_doc_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -133,17 +171,24 @@ async def upload_pdf(file: UploadFile = File(...)):
     if not safe_filename or Path(safe_filename).suffix.lower() != ".pdf":
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
         
-    unique_filename = f"{uuid.uuid4().hex}_{safe_filename}"
+    doc_id = uuid.uuid4().hex
+    unique_filename = f"{doc_id}_{safe_filename}"
     temp_dir = tempfile.mkdtemp(prefix="agentic_upload_")
     temp_file_path = os.path.join(temp_dir, unique_filename)
     try:
         with open(temp_file_path, "wb") as buffer:
             buffer.write(await file.read())
             
-        # Fire your custom Vector DB ingestion utility
-        ingest_pdf_to_chroma(temp_file_path)
+        # Fire your custom Vector DB ingestion utility, tagging every chunk
+        # with doc_id so "Chat with Paper" mode can filter retrieval.
+        ingest_pdf_to_chroma(temp_file_path, doc_id=doc_id)
         
-        return {"status": "success", "message": f"'{safe_filename}' successfully ingested into Vector Database!"}
+        return {
+            "status": "success",
+            "message": f"'{safe_filename}' successfully ingested into Vector Database!",
+            "doc_id": doc_id,
+            "filename": safe_filename,
+        }
         
     except Exception as e:
         print(f"\u274c Upload Error: {str(e)}")

@@ -54,6 +54,21 @@ def build_fallback_plan(query: str, gaps: List[str]) -> ToolSelectionPlan:
     return ToolSelectionPlan(tasks=tasks[:3])
 
 
+def build_document_focus_plan(query: str, gaps: List[str]) -> ToolSelectionPlan:
+    """
+    Deterministic plan for "Chat with Paper" mode.
+    Every knowledge gap is routed exclusively to the local RAG retriever;
+    external tools (web_searcher, web_crawler, arxiv_researcher) are bypassed
+    entirely so answers come only from the pinned document.
+    """
+    focus_gaps = gaps[:3] if gaps else [query]
+    tasks = [
+        ToolTask(gap=gap, tool_name="rag_retriever", query=gap)
+        for gap in focus_gaps
+    ]
+    return ToolSelectionPlan(tasks=tasks)
+
+
 # --- 2. THE SYSTEM PROMPT ---
 TOOL_ROUTER_PROMPT = """
 You are the Action Orchestrator for an AI Research System. Today's date is {date}.
@@ -95,6 +110,24 @@ def tool_router_node(state: dict):
     emit_progress(state, "[Tool Router] Selecting the best tools for the current research gaps.")
     
     print(f"🔀 [Tool Router] Routing {len(current_gaps)} gaps to specialized tools...")
+
+    # --- DOCUMENT FOCUS MODE ("Chat with Paper") ---
+    # When a target_doc_id is pinned in state, bypass the LLM routing call and
+    # all external search tools: every gap is routed to the local RAG retriever,
+    # which filters retrieval to that document's chunks.
+    target_doc_id = state.get("target_doc_id")
+    if target_doc_id:
+        plan = build_document_focus_plan(user_query, current_gaps)
+        print(f"📌 [Tool Router] Document focus active ({target_doc_id}). Routing {len(plan.tasks)} task(s) to rag_retriever only.")
+        emit_progress(state, f"[Tool Router] Document focus mode: routing {len(plan.tasks)} task(s) to the local document retriever.")
+        emit_event(state, "tool_telemetry", {
+            "count": len(plan.tasks),
+            "tasks": [
+                {"tool": task.tool_name, "query": task.query, "doc_id": target_doc_id}
+                for task in plan.tasks
+            ]
+        })
+        return {"pending_tool_tasks": plan.tasks}
     
     router = LLMRouter()
     
@@ -135,7 +168,7 @@ def tool_router_node(state: dict):
     emit_event(state, "tool_telemetry", {
         "count": len(plan.tasks),
         "tasks": [
-            {"tool": task.tool_name, "query": task.query}
+            {"tool": task.tool_name, "query": task.query, "doc_id": None}
             for task in plan.tasks
         ]
     })

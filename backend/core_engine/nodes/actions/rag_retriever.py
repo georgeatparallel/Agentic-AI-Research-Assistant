@@ -41,7 +41,7 @@ GUIDELINES:
 
 
 # --- 3. THE ACTION NODE WRAPPER ---
-async def execute_rag_action(gap: str, query: str) -> str:
+async def execute_rag_action(gap: str, query: str, doc_id: str | None = None) -> str:
     """
     Executes the ChromaDB similarity search, then uses the Fast LLM to summarize 
     the disjointed chunks into a cohesive answer.
@@ -49,7 +49,7 @@ async def execute_rag_action(gap: str, query: str) -> str:
     print(f"🗄️ [Action: RAG] Querying local vector database for: '{query}'")
     
     # 1. Fire the raw utility tool (The "Hands")
-    raw_text = retrieve_context(query)
+    raw_text = retrieve_context(query, doc_id=doc_id)
     
     if not raw_text or len(raw_text.strip()) < 10:
         return f"No relevant information found in the local database for '{query}'."

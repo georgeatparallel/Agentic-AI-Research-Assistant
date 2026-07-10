@@ -47,8 +47,10 @@ async def execute_tools_node(state: ResearchState):
             return f"--- WEB SEARCH RESULTS FOR '{task.query}' ---\n{result}"
             
         elif task.tool_name == "rag_retriever":
+            # "Chat with Paper" mode: restrict retrieval to the pinned document.
+            target_doc_id = state.get("target_doc_id")
             emit_progress(state, f"[RAG Retriever] Querying the local document knowledge base for {task.query}.")
-            result = await execute_rag_action(gap=task.gap, query=task.query)
+            result = await execute_rag_action(gap=task.gap, query=task.query, doc_id=target_doc_id)
             emit_progress(state, f"[RAG Retriever] Finished retrieving local context for {task.query}.")
             return f"--- RAG DATABASE RESULTS FOR '{task.query}' ---\n{result}"
             

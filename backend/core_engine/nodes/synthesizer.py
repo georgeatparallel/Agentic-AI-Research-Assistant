@@ -7,12 +7,87 @@ this node consumes the raw, aggregated tool findings and drafts a final, academi
 """
 
 from datetime import datetime
+from typing import List
+
+from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from core_engine.llm_router import LLMRouter
 from core_engine.session_memory import format_messages_for_prompt
 from core_engine.utilities.progress import emit_progress
+
+# Safety cap for the matrix extraction prompt context.
+MAX_MATRIX_FINDINGS_CHARS = 60000
+
+
+# --- 0. EXTRACTION MATRIX SCHEMAS (Elicit-style grid) ---
+class ExtractionRecord(BaseModel):
+    """One structured row of the extraction matrix (one per source document)."""
+    title: str = Field(description="Title of the source document or page")
+    url_or_source: str = Field(description="URL, arXiv link, or document/file name of the source")
+    abstract_summary: str = Field(description="Summary of the document in at most 2 sentences")
+    methodology: str = Field(description="Methodology or approach described, or 'N/A' if not applicable")
+    sample_size: str = Field(description="Sample size if reported, otherwise 'N/A'")
+    key_findings: str = Field(description="Most important findings from this document")
+
+
+class ExtractionMatrix(BaseModel):
+    """Structured output schema for the matrix extraction call."""
+    records: List[ExtractionRecord] = Field(
+        default_factory=list,
+        description="One record per distinct source document found in the findings",
+    )
+
+
+# NOTE: Keep this prompt free of stray literal curly braces (LangChain template rules).
+MATRIX_PROMPT = """
+You are a Research Data Extraction Specialist. Today's date is {date}.
+From the raw research findings below, identify every distinct source document
+(web page, arXiv paper, or uploaded PDF) and produce one structured record per document.
+
+RESEARCH FINDINGS:
+{findings}
+
+For each distinct document extract:
+- title: the document or page title.
+- url_or_source: the URL, arXiv link, or document/file name.
+- abstract_summary: a summary of the document in at most 2 sentences.
+- methodology: the methodology or approach described. Use 'N/A' if not applicable.
+- sample_size: the sample size if reported. Use 'N/A' if not applicable.
+- key_findings: the most important findings from that document.
+
+RULES:
+1. Only include documents that actually appear in the findings. Never invent sources.
+2. Deduplicate documents that appear multiple times.
+3. Every field must be a plain string.
+"""
+
+
+def _build_extraction_matrix(findings: str, state: dict) -> list:
+    """Run the structured matrix extraction. Fail-safe: returns [] on any error."""
+    if not findings or not findings.strip() or findings.strip().lower().startswith("no findings"):
+        return []
+
+    emit_progress(state, "[Synthesizer] Building the structured extraction matrix.")
+    try:
+        router = LLMRouter()
+        structured_llm = router.fast_model.with_structured_output(ExtractionMatrix)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", MATRIX_PROMPT),
+            ("human", "Extract the structured records now."),
+        ])
+        chain = prompt | structured_llm
+        matrix: ExtractionMatrix = chain.invoke({
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "findings": findings[:MAX_MATRIX_FINDINGS_CHARS],
+        })
+        records = [record.model_dump() for record in (matrix.records if matrix else [])]
+        print(f"[Synthesizer] Extraction matrix built with {len(records)} record(s).")
+        return records
+    except Exception as e:
+        print(f"[Synthesizer] Matrix extraction failed ({e}). Returning empty matrix.")
+        return []
 
 # --- 1. THE SYSTEM PROMPT ---
 SYNTHESIZER_PROMPT = """
@@ -83,10 +158,17 @@ def synthesizer_node(state: dict):
     
     completed_sections = state.get("completed_sections", [])
     completed_sections.append(final_draft)
+    
+    # DUAL OUTPUT: alongside the Markdown report, extract the Elicit-style
+    # structured matrix (one record per source document) before the ephemeral
+    # research history is purged below.
+    extraction_matrix = _build_extraction_matrix(findings, state)
+    
     emit_progress(state, f"[Synthesizer] Finished writing {section_title}.")
     
     return {
         "completed_sections": completed_sections,
+        "extraction_matrix": extraction_matrix,
         # Purge the ephemeral research history to prevent memory leaks across loops
         "research_history": "" 
     }

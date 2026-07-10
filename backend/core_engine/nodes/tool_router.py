@@ -111,12 +111,14 @@ def tool_router_node(state: dict):
     
     print(f"🔀 [Tool Router] Routing {len(current_gaps)} gaps to specialized tools...")
 
-    # --- DOCUMENT FOCUS MODE ("Chat with Paper") ---
-    # When a target_doc_id is pinned in state, bypass the LLM routing call and
-    # all external search tools: every gap is routed to the local RAG retriever,
-    # which filters retrieval to that document's chunks.
+    # --- DOCUMENT FOCUS MODE ("Chat with Paper" / 'Chat with papers' workflow) ---
+    # When a target_doc_id is pinned in state, OR the 'chat_with_papers' workflow
+    # set the rag_only flag, bypass the LLM routing call and all external search
+    # tools: every gap is routed to the local RAG retriever. With a pinned doc,
+    # retrieval is additionally filtered to that document's chunks.
     target_doc_id = state.get("target_doc_id")
-    if target_doc_id:
+    rag_only = bool(state.get("rag_only"))
+    if target_doc_id or rag_only:
         plan = build_document_focus_plan(user_query, current_gaps)
         print(f"📌 [Tool Router] Document focus active ({target_doc_id}). Routing {len(plan.tasks)} task(s) to rag_retriever only.")
         emit_progress(state, f"[Tool Router] Document focus mode: routing {len(plan.tasks)} task(s) to the local document retriever.")

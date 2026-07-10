@@ -32,6 +32,16 @@ app.add_middleware(
 # Initialize the Engine once when the server starts
 orchestrator = ResearchOrchestrator()
 
+# Valid Elicit command-bar workflow selections (TOOLS + WORKFLOWS).
+ALLOWED_WORKFLOWS = {
+    "find_papers",
+    "chat_with_papers",
+    "extract_data",
+    "research_agent",
+    "report",
+    "systematic_review",
+}
+
 # --- SCHEMAS ---
 class ResearchRequest(BaseModel):
     query: str
@@ -39,6 +49,9 @@ class ResearchRequest(BaseModel):
     # Conversational continuity: the frontend generates a stable session_id per
     # chat and sends it with every turn so follow-ups reference prior reports.
     session_id: Optional[str] = None
+    # Elicit command-bar selection: one of ALLOWED_WORKFLOWS, or None for the
+    # legacy intent-classified behaviour.
+    workflow_mode: Optional[str] = None
 
 class PaperResearchRequest(BaseModel):
     """Isolated "Chat with Paper" request: answers come only from one ingested document."""
@@ -46,6 +59,20 @@ class PaperResearchRequest(BaseModel):
     # The document ID returned by /api/upload-pdf; retrieval is filtered to it.
     target_doc_id: str
     session_id: Optional[str] = None
+    workflow_mode: Optional[str] = None
+
+
+def normalize_workflow_mode(workflow_mode: Optional[str]) -> Optional[str]:
+    """Validate and normalize the command-bar workflow selection."""
+    if not workflow_mode:
+        return None
+    normalized = workflow_mode.strip().lower()
+    if normalized not in ALLOWED_WORKFLOWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid workflow_mode. Use one of: {', '.join(sorted(ALLOWED_WORKFLOWS))}.",
+        )
+    return normalized
 
 # --- 1. RESEARCH ENDPOINT ---
 @app.post("/api/research")
@@ -54,9 +81,15 @@ async def generate_research(request: ResearchRequest):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Search query cannot be empty.")
         
+    workflow_mode = normalize_workflow_mode(request.workflow_mode)
+
     try:
-        if request.mode == "single":
-            result = await orchestrator.run_single_research(request.query, session_id=request.session_id)
+        if workflow_mode or request.mode == "single":
+            # Explicit workflows always run through the single worker graph;
+            # the Intent Classifier maps workflow_mode to the right route.
+            result = await orchestrator.run_single_research(
+                request.query, session_id=request.session_id, workflow_mode=workflow_mode
+            )
         elif request.mode == "deep":
             result = await orchestrator.run_deep_research(request.query, session_id=request.session_id)
         else:
@@ -83,10 +116,11 @@ async def research_event_stream(
     mode: str,
     session_id: Optional[str] = None,
     target_doc_id: Optional[str] = None,
+    workflow_mode: Optional[str] = None,
 ):
     """Yield assurance tokens, tool telemetry, progress updates, and the final report as SSE chunks."""
     try:
-        async for update in orchestrator.stream_research(query, mode, session_id, target_doc_id):
+        async for update in orchestrator.stream_research(query, mode, session_id, target_doc_id, workflow_mode):
             event_type = update["event"]
             data = update["data"]
 
@@ -138,8 +172,10 @@ async def stream_research(request: ResearchRequest):
     if request.mode not in {"single", "deep"}:
         raise HTTPException(status_code=400, detail="Invalid mode. Use 'single' or 'deep'.")
 
+    workflow_mode = normalize_workflow_mode(request.workflow_mode)
+
     return StreamingResponse(
-        research_event_stream(request.query, request.mode, request.session_id),
+        research_event_stream(request.query, request.mode, request.session_id, None, workflow_mode),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -164,8 +200,10 @@ async def stream_paper_research(request: PaperResearchRequest):
     if not request.target_doc_id.strip():
         raise HTTPException(status_code=400, detail="target_doc_id is required for paper-focused research.")
 
+    workflow_mode = normalize_workflow_mode(request.workflow_mode)
+
     return StreamingResponse(
-        research_event_stream(request.query, "single", request.session_id, request.target_doc_id),
+        research_event_stream(request.query, "single", request.session_id, request.target_doc_id, workflow_mode),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

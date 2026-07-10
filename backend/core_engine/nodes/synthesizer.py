@@ -172,3 +172,61 @@ def synthesizer_node(state: dict):
         # Purge the ephemeral research history to prevent memory leaks across loops
         "research_history": "" 
     }
+
+
+# --- 3. THE HEAVY SYNTHESIS NODE ('Report' workflow) ---
+HEAVY_SYNTHESIZER_PROMPT = """
+You are a Senior Academic Researcher writing a long-form literature review. Today's date is {date}.
+
+ORIGINAL QUERY: {query}
+
+PRIOR CONVERSATION CONTEXT (may be empty):
+{conversation}
+
+RESEARCH FINDINGS TO SYNTHESIZE:
+{findings}
+
+Write a comprehensive, long-form Markdown literature review. Do NOT use markdown code fences. Requirements:
+1. A title and a short abstract.
+2. Clearly organized thematic sections with level-2 headings.
+3. Deep analysis: compare and contrast sources, discuss methodologies, highlight open problems and future directions.
+4. Numbered citations [1], [2] immediately after claims, using ONLY the provided findings.
+5. A final References section mapping the numbers to source URLs or document names.
+Never invent sources or facts that are not in the findings.
+"""
+
+
+def heavy_synthesizer_node(state: dict):
+    """'Report' workflow: long-form Markdown literature review, no extraction matrix."""
+    user_query = state.get("query", "Unknown query")
+    findings = state.get("research_history", "No findings provided.")
+    conversation = format_messages_for_prompt(state.get("chat_history", []) or [])
+    emit_progress(state, "[Heavy Synthesizer] Drafting the long-form literature review.")
+    print("[Heavy Synthesizer] Writing long-form literature review...")
+
+    router = LLMRouter()
+    llm = router.main_model
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", HEAVY_SYNTHESIZER_PROMPT),
+        ("human", "Write the long-form literature review now."),
+    ])
+    chain = prompt | llm | StrOutputParser()
+
+    final_draft = chain.invoke({
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "query": user_query,
+        "conversation": conversation,
+        "findings": findings,
+    })
+
+    completed_sections = state.get("completed_sections", [])
+    completed_sections.append(final_draft)
+    emit_progress(state, "[Heavy Synthesizer] Finished the literature review.")
+
+    return {
+        "completed_sections": completed_sections,
+        # The 'report' workflow intentionally omits the extraction matrix.
+        "extraction_matrix": [],
+        "research_history": "",
+    }

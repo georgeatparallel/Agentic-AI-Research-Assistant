@@ -25,6 +25,29 @@ from core_engine.utilities.progress import emit_progress
 # Route constants shared across the engine.
 CONVERSATIONAL = "CONVERSATIONAL"
 DEEP_RESEARCH = "DEEP_RESEARCH"
+RESEARCH_AGENT = "RESEARCH_AGENT"
+SYSTEMATIC_REVIEW = "SYSTEMATIC_REVIEW"
+
+# Elicit command-bar workflow -> graph route mapping.
+# 'find_papers' and 'extract_data' reuse the parallel search + extraction
+# matrix loop; 'chat_with_papers' also sets rag_only so the Tool Router
+# bypasses all external search tools; 'report' runs the loop but exits via
+# heavy synthesis (long-form literature review, no matrix).
+WORKFLOW_ROUTE_MAP = {
+    "find_papers": DEEP_RESEARCH,
+    "extract_data": DEEP_RESEARCH,
+    "chat_with_papers": DEEP_RESEARCH,
+    "report": DEEP_RESEARCH,
+    "research_agent": RESEARCH_AGENT,
+    "systematic_review": SYSTEMATIC_REVIEW,
+}
+
+
+def resolve_workflow_route(workflow_mode) -> str | None:
+    """Map an explicit command-bar workflow to a graph route (None if unknown/absent)."""
+    if not workflow_mode:
+        return None
+    return WORKFLOW_ROUTE_MAP.get(str(workflow_mode).strip().lower())
 
 
 # --- 1. PYDANTIC SCHEMA ---
@@ -97,9 +120,21 @@ async def classify_intent(query: str, chat_history: Optional[List] = None) -> st
 
 # --- 3. THE LANGGRAPH NODE ---
 async def intent_classifier_node(state: dict):
-    """LangGraph entry node: resolve (or respect a preset) intent route."""
+    """LangGraph entry node: resolve workflow, preset, or classified intent route."""
+    # 1. Explicit workflow selection from the Elicit command bar wins outright.
+    workflow_mode = str(state.get("workflow_mode") or "").strip().lower()
+    workflow_route = resolve_workflow_route(workflow_mode)
+    if workflow_route:
+        updates: dict = {"intent_route": workflow_route}
+        if workflow_mode == "chat_with_papers":
+            # Force local-RAG-only tool routing (no external web/arXiv search).
+            updates["rag_only"] = True
+        print(f"[Intent Classifier] Workflow '{workflow_mode}' routed to: {workflow_route}")
+        return updates
+
+    # 2. Preset route (deep-mode sections, paper focus, SSE gate).
     preset = state.get("intent_route")
-    if preset in (CONVERSATIONAL, DEEP_RESEARCH):
+    if preset in (CONVERSATIONAL, DEEP_RESEARCH, RESEARCH_AGENT, SYSTEMATIC_REVIEW):
         # Orchestrator already decided (deep-mode sections, paper focus, SSE gate).
         return {"intent_route": preset}
 

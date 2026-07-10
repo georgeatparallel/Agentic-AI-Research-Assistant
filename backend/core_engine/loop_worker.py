@@ -109,12 +109,17 @@ def check_research_status(state: ResearchState):
 
 
 # --- 3. BUILD THE GRAPH ---
-def build_loop_worker():
+def build_loop_worker(checkpointer=None):
     """
     Compiles and constructs the LangGraph state machine.
     
     This function defines the topology of the agentic workflow, linking cognitive nodes
     (evaluation, routing, synthesis) with action nodes (tool execution) via directed edges.
+    
+    Args:
+        checkpointer: Optional LangGraph checkpointer (e.g. MemorySaver) enabling
+            persistent, thread-scoped state saving. When provided, callers must
+            invoke the graph with a `configurable.thread_id` config entry.
     
     Returns:
         CompiledGraph: An executable LangGraph workflow ready for invocation.
@@ -148,4 +153,4 @@ def build_loop_worker():
     # 5. Define the Exit Point
     workflow.add_edge("synthesize", END)
     
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

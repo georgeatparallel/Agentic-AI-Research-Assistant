@@ -13,7 +13,7 @@ from datetime import datetime
 from langchain_core.prompts import ChatPromptTemplate
 
 from core_engine.llm_router import LLMRouter
-from core_engine.utilities.progress import emit_progress
+from core_engine.utilities.progress import emit_progress, emit_event
 
 # --- 1. PYDANTIC SCHEMAS (The Action Payload Blueprint) ---
 class ToolTask(BaseModel):
@@ -129,6 +129,16 @@ def tool_router_node(state: dict):
     print(f"🛠️ [Tool Router] Selected {len(plan.tasks)} tools to execute.")
     selected_tools = ", ".join(task.tool_name for task in plan.tasks) or "no external tools"
     emit_progress(state, f"[Tool Router] Selected {len(plan.tasks)} tool task(s): {selected_tools}.")
+
+    # Emit a structured tool_telemetry packet so the frontend can render the
+    # Elicit-style collapsible accordion showing the exact concurrent queries.
+    emit_event(state, "tool_telemetry", {
+        "count": len(plan.tasks),
+        "tasks": [
+            {"tool": task.tool_name, "query": task.query}
+            for task in plan.tasks
+        ]
+    })
 
     for task in plan.tasks:
         print(f"   -> Assigned '{task.tool_name}' with query: '{task.query}'")

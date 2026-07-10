@@ -2,9 +2,15 @@
 Progress Streaming Utilities
 ============================
 Shared helpers for emitting clean, UI-safe progress messages from LangGraph nodes.
+
+Checkpoint-safe design: live asyncio.Queue objects are held in a module-level
+registry keyed by an opaque string (`progress_stream_id`). Graph state only
+carries the string, which keeps the state fully serializable for LangGraph
+checkpointers while nodes can still stream events in real time.
 """
 
 import re
+import uuid
 from typing import Any
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -29,6 +35,32 @@ NON_ASCII_RE = re.compile(r"[^\x09\x0A\x0D\x20-\x7E]")
 CONTROL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]")
 WHITESPACE_RE = re.compile(r"[ \t]+")
 
+# --- LIVE STREAM REGISTRY (checkpoint-safe queue lookup) ---
+_PROGRESS_STREAMS: dict[str, Any] = {}
+
+
+def register_progress_stream(queue: Any) -> str:
+    """Register a live queue and return the serializable id to place in graph state."""
+    stream_id = uuid.uuid4().hex
+    _PROGRESS_STREAMS[stream_id] = queue
+    return stream_id
+
+
+def release_progress_stream(stream_id: str) -> None:
+    """Remove a queue from the registry once its research run has finished."""
+    _PROGRESS_STREAMS.pop(stream_id, None)
+
+
+def _resolve_queue(state: dict[str, Any]) -> Any:
+    """Find the active stream queue via the legacy direct handle or the registry."""
+    queue = state.get("progress_queue")
+    if queue is not None:
+        return queue
+    stream_id = state.get("progress_stream_id")
+    if stream_id:
+        return _PROGRESS_STREAMS.get(stream_id)
+    return None
+
 
 def sanitize_status(message: str) -> str:
     """
@@ -45,10 +77,21 @@ def sanitize_status(message: str) -> str:
 
 def emit_progress(state: dict[str, Any], message: str) -> None:
     """Push a sanitized progress message into the active stream queue, if present."""
-    progress_queue = state.get("progress_queue")
-    if progress_queue is None:
+    queue = _resolve_queue(state)
+    if queue is None:
         return
 
     cleaned = sanitize_status(message)
     if cleaned:
-        progress_queue.put_nowait(cleaned)
+        queue.put_nowait(cleaned)
+
+
+def emit_event(state: dict[str, Any], event: str, payload: dict) -> None:
+    """
+    Push a structured event (e.g. `tool_telemetry`) into the active stream queue.
+    The orchestrator forwards these dict packets verbatim to the SSE endpoint.
+    """
+    queue = _resolve_queue(state)
+    if queue is None:
+        return
+    queue.put_nowait({"event": event, "data": payload})

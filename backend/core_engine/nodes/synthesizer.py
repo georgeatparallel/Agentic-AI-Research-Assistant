@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from core_engine.llm_router import LLMRouter
+from core_engine.session_memory import format_messages_for_prompt
 from core_engine.utilities.progress import emit_progress
 
 # --- 1. THE SYSTEM PROMPT ---
@@ -22,6 +23,9 @@ ORIGINAL OVERALL QUERY: {query}
 SPECIFIC SECTION TITLE: {section_title}
 SPECIFIC SECTION QUESTION: {section_question}
 
+PRIOR CONVERSATION CONTEXT (earlier questions and reports from this session; may be empty):
+{conversation}
+
 RESEARCH FINDINGS TO SYNTHESIZE:
 {findings}
 
@@ -30,7 +34,8 @@ GUIDELINES:
 2. Answer the specific section question directly using ONLY the provided research findings.
 3. Do NOT hallucinate or add outside information that is not supported by the findings.
 4. Include references to the source URLs or Document Names for all data. Use numbered brackets [1], [2], etc., immediately after the claim.
-5. Provide a "References" section at the very bottom of your output listing the sources you used.
+5. Provide a \"References\" section at the very bottom of your output listing the sources you used.
+6. If the section question is a conversational follow-up, you may also draw on the prior conversation context above; prefer the new research findings whenever they conflict with older answers.
 
 CRITICAL CITATION RULES:
 1. NEVER use raw artifact names or search queries in your citations (e.g., do NOT output [Web Search Summary: '...' - 1]).
@@ -45,9 +50,10 @@ def synthesizer_node(state: dict):
     section_title = state.get("current_section_title", "General Research")
     section_question = state.get("current_section", "Summarize findings")
     findings = state.get("research_history", "No findings provided.")
+    conversation = format_messages_for_prompt(state.get("chat_history", []) or [])
     emit_progress(state, f"[Synthesizer] Drafting the final Markdown report for {section_title}.")
     
-    print(f"✍️ [Synthesizer] Writing report section: '{section_title}'...")
+    print(f"\u270d\ufe0f [Synthesizer] Writing report section: '{section_title}'...")
     
     # We use the Main Model here because processing thousands of characters of 
     # aggregated web/RAG data requires a highly robust context window and strong linguistic synthesis.
@@ -69,10 +75,11 @@ def synthesizer_node(state: dict):
         "query": user_query,
         "section_title": section_title,
         "section_question": section_question,
+        "conversation": conversation,
         "findings": findings
     })
     
-    print(f"✅ [Synthesizer] Section '{section_title}' successfully written!")
+    print(f"\u2705 [Synthesizer] Section '{section_title}' successfully written!")
     
     completed_sections = state.get("completed_sections", [])
     completed_sections.append(final_draft)

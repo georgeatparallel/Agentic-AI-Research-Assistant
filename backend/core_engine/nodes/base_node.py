@@ -11,6 +11,8 @@ import operator
 from typing import TypedDict, Annotated, List, Any
 from typing_extensions import NotRequired
 
+from langgraph.graph.message import add_messages
+
 # --- GLOBAL LANGGRAPH STATE ---
 
 class ResearchState(TypedDict):
@@ -41,5 +43,16 @@ class ResearchState(TypedDict):
     # 5. Safety Limits: Prevents infinite API loops
     loop_count: int
 
-    # 6. Optional Streaming: Carries progress events to the SSE endpoint
+    # 6. Optional Streaming (legacy path): Carries progress events to the SSE endpoint.
+    # NOTE: Do not set this when the graph is compiled with a checkpointer; an
+    # asyncio.Queue is not serializable. Prefer `progress_stream_id` below.
     progress_queue: NotRequired[Any]
+
+    # 6b. Checkpoint-safe streaming handle: a string key resolved to the live
+    # asyncio.Queue through the registry in `core_engine.utilities.progress`.
+    progress_stream_id: NotRequired[str]
+
+    # 7. Conversational Memory: Sliding window of prior chat turns for this session.
+    # Tracked with LangGraph's `add_messages` reducer so nodes can reference
+    # previously generated reports when handling follow-up questions.
+    chat_history: NotRequired[Annotated[List[Any], add_messages]]

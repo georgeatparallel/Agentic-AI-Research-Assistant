@@ -74,3 +74,16 @@ class ResearchState(TypedDict):
     # Synthesizer (Elicit-style grid). Each record carries: title,
     # url_or_source, abstract_summary, methodology, sample_size, key_findings.
     extraction_matrix: NotRequired[List[Dict[str, Any]]]
+
+    # 11. Workflow Selection (Elicit command bar): one of 'find_papers',
+    # 'chat_with_papers', 'extract_data', 'research_agent', 'report', or
+    # 'systematic_review'. Mapped to a graph route by the Intent Classifier.
+    workflow_mode: NotRequired[str]
+
+    # 12. RAG-only flag ('Chat with papers' workflow): forces the Tool Router
+    # to bypass all external search tools even without a pinned target_doc_id.
+    rag_only: NotRequired[bool]
+
+    # 13. Clarification flag (Research Agent workflow): True when the agent
+    # asked the user a clarifying question instead of running the research loop.
+    needs_clarification: NotRequired[bool]

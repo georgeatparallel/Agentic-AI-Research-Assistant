@@ -401,7 +401,10 @@ function CommandBar({
           </button>
 
           {open && (
-            <div className={`absolute left-0 w-72 bg-white border border-slate-200 rounded-xl shadow-2xl overflow-hidden z-50 ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
+            /* Constrained container: max-h + overflow-y-auto keeps the expanded
+               TOOLS/WORKFLOWS categories inside the viewport with a smooth
+               vertical scrollbar instead of spilling off-screen. */
+            <div className={`absolute left-0 w-72 bg-white border border-slate-200 rounded-xl shadow-2xl max-h-[320px] overflow-y-auto overscroll-contain z-50 ${dropUp ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
               {(['TOOLS', 'WORKFLOWS'] as const).map(group => (
                 <div key={group}>
                   <div className="px-4 pt-3 pb-1 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
